@@ -1,21 +1,9 @@
 // imageAnalysis.ts
 //Image Analysis Model
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI, Type } from "@google/genai";
+import { TVInstallParams, ImageAnalysisResult } from "./types";
 
-const client = new Anthropic();
-
-export interface ImageAnalysisResult {
-  wallType: "drywall" | "brick" | "concrete" | "tile" | "plaster" | "unknown";
-  outletVisible: boolean;
-  outletPosition: "behind_tv_area" | "nearby" | "far" | "unknown";
-  obstaclesDetected: string[];       // e.g. ["fireplace", "crown_molding"]
-  existingMount: boolean;
-  aboveFireplace: boolean;
-  estimatedMountHeight: number | null; // inches from floor, if inferrable
-  confidence: number;                // 0–1
-  parameterOverrides: Partial<TVInstallParams>; // fields image can replace
-  validationFlags: string[];         // conflicts with user-provided params
-}
+const ai = new GoogleGenAI({});
 
 export async function analyzeInstallImage(
   base64Image: string,
@@ -24,48 +12,44 @@ export async function analyzeInstallImage(
 ): Promise<ImageAnalysisResult> {
   
   const prompt = `You are an expert TV installation estimator analyzing a photo of an installation site.
+Analyze this image and populate the requested JSON schema.
 
-Analyze this image and return a JSON object with ONLY these fields:
-{
-  "wallType": "drywall" | "brick" | "concrete" | "tile" | "plaster" | "unknown",
-  "outletVisible": boolean,
-  "outletPosition": "behind_tv_area" | "nearby" | "far" | "unknown",
-  "obstaclesDetected": string[],  // e.g. ["fireplace", "crown_molding", "built_in_shelving"]
-  "existingMount": boolean,
-  "aboveFireplace": boolean,
-  "estimatedMountHeight": number | null,  // approximate inches from floor
-  "confidence": number,  // 0.0 to 1.0
-  "parameterOverrides": {},  // params you can confidently infer
-  "validationFlags": []  // list any conflicts with these user-provided params: ${JSON.stringify(userParams)}
-}
+User stated wall type is: ${userParams.wallMaterial ?? "not specified"}
+User stated mount height: ${userParams.mountHeight ?? "not specified"}
+User stated above fireplace: ${userParams.aboveFireplace ?? "not specified"}`;
 
-User said wall type is: ${userParams.wallMaterial ?? "not specified"}
-User said mount height: ${userParams.mountHeight ?? "not specified"}
-User said above fireplace: ${userParams.aboveFireplace ?? "not specified"}
+  const imagePart = {
+    inlineData: { data: base64Image, mimeType: mediaType }
+  };
 
-Return ONLY valid JSON, no explanation.`;
-
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 1000,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: mediaType, data: base64Image }
-          },
-          { type: "text", text: prompt }
-        ]
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: [prompt, imagePart],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          wallType: { type: Type.STRING, enum: ["drywall", "brick", "concrete", "tile", "plaster", "unknown"] },
+          outletVisible: { type: Type.BOOLEAN },
+          outletPosition: { type: Type.STRING, enum: ["behind_tv_area", "nearby", "far", "unknown"] },
+          obstaclesDetected: { type: Type.ARRAY, items: { type: Type.STRING } },
+          existingMount: { type: Type.BOOLEAN },
+          aboveFireplace: { type: Type.BOOLEAN },
+          estimatedMountHeight: { type: Type.INTEGER, nullable: true },
+          confidence: { type: Type.NUMBER },
+          parameterOverrides: { type: Type.OBJECT },
+          validationFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: [
+          "wallType", "outletVisible", "outletPosition", "obstaclesDetected", 
+          "existingMount", "aboveFireplace", "estimatedMountHeight", 
+          "confidence", "parameterOverrides", "validationFlags"
+        ],
       }
-    ]
+    }
   });
 
-  const text = response.content
-    .filter(b => b.type === "text")
-    .map(b => (b as any).text)
-    .join("");
-
-  return JSON.parse(text.replace(/```json|```/g, "").trim()) as ImageAnalysisResult;
+  if (!response.text) throw new Error("Failed to receive response from Gemini.");
+  return JSON.parse(response.text) as ImageAnalysisResult;
 }
