@@ -1,178 +1,200 @@
-// estimationEngine.ts
-//Parameter Types + Estimation Engine
+import { CompiledInstallParams, EstimationResult } from "./types";
 
-export interface TVInstallParams {
-  // TV
-  screenSizeInches: number;       // diagonal
-  weightLbs: number;
-  mountType: "fixed" | "tilt" | "full_motion";
-  
-  // Wall
-  wallMaterial: "drywall" | "brick" | "concrete" | "tile" | "plaster";
-  studsAvailable: boolean | null;
-  existingMount: boolean;
-  
-  // Environment
-  mountHeight: number;            // inches from floor
-  aboveFireplace: boolean;
-  roomType: "living_room" | "bedroom" | "outdoor" | "commercial";
-  
-  // Wiring
-  outletPosition: "behind_tv_area" | "nearby" | "far";
-  inWallCableRouting: boolean;
-  cableSurfaceRaceway: boolean;
-  
-  // Access
-  furnitureToMove: boolean;
-  ladderRequired: boolean;
-  obstacles: string[];
-}
+const BASE_INSTALL_MINUTES = 45;
 
-export interface EstimationResult {
-  estimatedMinutes: number;
-  rangeMin: number;
-  rangeMax: number;
-  confidenceLevel: "high" | "medium" | "low";
-  breakdown: Record<string, number>;  // task → minutes
-  flags: string[];                    // warnings for the installer
-  imageValidationNotes: string[];
-}
-
-// ─── Base times (minutes) ────────────────────────────────────────────────────
-
-const BASE_INSTALL_TIME = 45; // standard drywall, fixed mount, easy access
-
-const WALL_MATERIAL_ADDERS: Record<string, number> = {
-  drywall:   0,
-  plaster:  15,
-  tile:     25,
-  brick:    35,
+const WALL_MATERIAL_MINUTES: Record<CompiledInstallParams["wallMaterial"], number> = {
+  drywall: 0,
+  plaster: 15,
+  tile: 25,
+  brick: 35,
   concrete: 40,
+  unknown: 20,
 };
 
-const MOUNT_TYPE_ADDERS: Record<string, number> = {
-  fixed:       0,
-  tilt:       10,
+const MOUNT_TYPE_MINUTES: Record<CompiledInstallParams["mountType"], number> = {
+  fixed: 0,
+  tilting: 10,
   full_motion: 25,
 };
 
-function tvSizeAdder(inches: number): number {
-  if (inches <= 43) return 0;
-  if (inches <= 55) return 5;
-  if (inches <= 65) return 15;
-  if (inches <= 75) return 25;
-  return 40; // 85"+
+const WIRE_CONCEALMENT_MINUTES: Record<CompiledInstallParams["wireConcealment"], number> = {
+  none: 0,
+  external_track: 10,
+  in_wall: 35,
+};
+
+const OUTLET_POSITION_MINUTES: Record<CompiledInstallParams["outletPosition"], number> = {
+  behind_tv_area: 0,
+  nearby: 8,
+  far: 20,
+  unknown: 5,
+};
+
+interface SequentialModifier {
+  key: string;
+  minutes: (params: CompiledInstallParams) => number;
+  notice?: (params: CompiledInstallParams) => string | null;
 }
 
-function tvWeightAdder(lbs: number): number {
-  if (lbs <= 30) return 0;
-  if (lbs <= 60) return 10;
-  if (lbs <= 100) return 20;
-  return 35;
+function tvDiagonalMinutes(diagonal: number): number {
+  if (diagonal <= 43) return 0;
+  if (diagonal <= 55) return 5;
+  if (diagonal <= 65) return 15;
+  if (diagonal <= 75) return 25;
+  return 40;
 }
 
-// ─── Main estimator ──────────────────────────────────────────────────────────
+function tvDepthMinutes(depth: number): number {
+  if (depth <= 2) return 0;
+  if (depth <= 3.5) return 5;
+  return 10;
+}
 
+function mountHeightMinutes(height: number): number {
+  if (height <= 72) return 0;
+  if (height <= 84) return 10;
+  return 20;
+}
+
+function obstacleMinutes(obstacles: string[]): number {
+  let total = 0;
+
+  for (const obstacle of obstacles) {
+    const normalized = obstacle.toLowerCase();
+
+    if (normalized.includes("crown") || normalized.includes("molding")) {
+      total += 10;
+    } else if (normalized.includes("shelf") || normalized.includes("built-in")) {
+      total += 15;
+    } else if (normalized.includes("fireplace") || normalized.includes("mantel")) {
+      total += 10;
+    } else if (normalized.includes("window") || normalized.includes("curtain")) {
+      total += 8;
+    } else {
+      total += 5;
+    }
+  }
+
+  return total;
+}
+
+/**
+ * Sequential modifier matrix: each step adds minutes on top of the running total.
+ * Order matters — base time first, then wall, size, mount, environment, wiring, access.
+ */
+const MODIFIER_SEQUENCE: SequentialModifier[] = [
+  {
+    key: "base_install",
+    minutes: () => BASE_INSTALL_MINUTES,
+  },
+  {
+    key: "wall_material",
+    minutes: (params) => WALL_MATERIAL_MINUTES[params.wallMaterial],
+    notice: (params) =>
+      params.wallMaterial === "drywall"
+        ? null
+        : `${params.wallMaterial} wall requires specialty anchors and slower drilling`,
+  },
+  {
+    key: "tv_diagonal",
+    minutes: (params) => tvDiagonalMinutes(params.tvDiagonal),
+    notice: (params) =>
+      params.tvDiagonal >= 75 ? "Large TV — second person may be required" : null,
+  },
+  {
+    key: "tv_depth",
+    minutes: (params) => tvDepthMinutes(params.tvDepth),
+  },
+  {
+    key: "mount_type",
+    minutes: (params) => MOUNT_TYPE_MINUTES[params.mountType],
+  },
+  {
+    key: "above_fireplace",
+    minutes: (params) => (params.aboveFireplace ? 30 : 0),
+    notice: (params) =>
+      params.aboveFireplace
+        ? "Above-fireplace mounts require careful heat clearance and cable routing"
+        : null,
+  },
+  {
+    key: "mount_height",
+    minutes: (params) => mountHeightMinutes(params.mountHeight),
+    notice: (params) =>
+      params.mountHeight > 72 ? "High mount — ladder positioning adds complexity" : null,
+  },
+  {
+    key: "wire_concealment",
+    minutes: (params) => WIRE_CONCEALMENT_MINUTES[params.wireConcealment],
+    notice: (params) =>
+      params.wireConcealment === "in_wall"
+        ? "In-wall cable routing adds significant time and may need permit review"
+        : null,
+  },
+  {
+    key: "outlet_position",
+    minutes: (params) => OUTLET_POSITION_MINUTES[params.outletPosition],
+    notice: (params) =>
+      params.outletPosition === "far"
+        ? "Outlet is far from the TV location — extension or new outlet may be needed"
+        : null,
+  },
+  {
+    key: "existing_mount_removal",
+    minutes: (params) => (params.existingMount ? 15 : 0),
+    notice: (params) =>
+      params.existingMount ? "Existing mount must be removed before installation" : null,
+  },
+  {
+    key: "site_obstacles",
+    minutes: (params) => obstacleMinutes(params.obstaclesDetected),
+    notice: (params) =>
+      params.obstaclesDetected.length > 0
+        ? `Obstacles detected: ${params.obstaclesDetected.join(", ")}`
+        : null,
+  },
+];
+
+function confidenceBuffer(score: number): number {
+  if (score >= 0.8) return 0.15;
+  if (score >= 0.6) return 0.25;
+  return 0.4;
+}
+
+/**
+ * Pure, math-based install time estimator.
+ * Applies modifiers sequentially; no side effects or external API calls.
+ */
 export function estimateInstallTime(
-  params: TVInstallParams,
-  imageResult: ImageAnalysisResult | null
+  params: CompiledInstallParams,
+  confidenceScore = 0.75
 ): EstimationResult {
-  
-  // Merge image inferences into params (image overrides if confidence is high)
-  const merged = { ...params };
-  if (imageResult && imageResult.confidence >= 0.75) {
-    Object.assign(merged, imageResult.parameterOverrides);
-  }
-
   const breakdown: Record<string, number> = {};
-  const flags: string[] = [];
+  const notices: string[] = [];
 
-  // Base
-  breakdown["base_install"] = BASE_INSTALL_TIME;
+  for (const modifier of MODIFIER_SEQUENCE) {
+    const addedMinutes = modifier.minutes(params);
+    breakdown[modifier.key] = addedMinutes;
 
-  // Wall material
-  breakdown["wall_material"] = WALL_MATERIAL_ADDERS[merged.wallMaterial] ?? 20;
-  if (merged.wallMaterial !== "drywall") {
-    flags.push(`${merged.wallMaterial} wall requires specialty anchors and drilling`);
+    const notice = modifier.notice?.(params);
+    if (notice) {
+      notices.push(notice);
+    }
   }
 
-  // No studs → toggle anchors needed
-  if (merged.studsAvailable === false) {
-    breakdown["toggle_anchors"] = 20;
-    flags.push("No studs found — toggle/masonry anchors add time");
-  }
+  const estimatedDurationMinutes = Object.values(breakdown).reduce(
+    (total, minutes) => total + minutes,
+    0
+  );
 
-  // Mount type
-  breakdown["mount_type"] = MOUNT_TYPE_ADDERS[merged.mountType];
-
-  // TV size & weight
-  breakdown["tv_size"] = tvSizeAdder(merged.screenSizeInches);
-  breakdown["tv_weight"] = tvWeightAdder(merged.weightLbs);
-  if (merged.weightLbs > 80) flags.push("Heavy TV — second person may be required");
-
-  // Above fireplace
-  if (merged.aboveFireplace) {
-    breakdown["fireplace_mount"] = 30;
-    flags.push("Above-fireplace mounts require special cable routing and positioning");
-  }
-
-  // Cable management
-  if (merged.inWallCableRouting) {
-    breakdown["in_wall_wiring"] = 35;
-    flags.push("In-wall cable routing adds significant time and may need permit check");
-  } else if (merged.cableSurfaceRaceway) {
-    breakdown["raceway"] = 10;
-  }
-
-  // Outlet distance
-  if (merged.outletPosition === "far") {
-    breakdown["outlet_extension"] = 20;
-    flags.push("Outlet not near TV location — extension or new outlet may be needed");
-  } else if (merged.outletPosition === "nearby") {
-    breakdown["outlet_routing"] = 8;
-  }
-
-  // Access & environment
-  if (merged.furnitureToMove) breakdown["furniture_move"] = 15;
-  if (merged.ladderRequired)   breakdown["ladder_setup"] = 10;
-  if (merged.existingMount)    breakdown["remove_old_mount"] = 15;
-  if (merged.mountHeight > 72) {
-    breakdown["high_mount_adj"] = 10;
-    flags.push("High mount (>6ft) — ladder positioning adds complexity");
-  }
-
-  // Obstacles
-  if (merged.obstacles.includes("crown_molding")) {
-    breakdown["crown_molding"] = 10;
-  }
-  if (merged.obstacles.includes("built_in_shelving")) {
-    breakdown["built_in_nav"] = 15;
-    flags.push("Built-in shelving detected — routing cables will require extra care");
-  }
-
-  const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
-
-  // Confidence: lower if image had low confidence or params were missing
-  const missingParams = [params.wallMaterial, params.weightLbs, params.mountType]
-    .filter(v => v == null).length;
-  
-  let confidenceLevel: "high" | "medium" | "low" = "high";
-  if (missingParams >= 2 || (imageResult && imageResult.confidence < 0.6)) {
-    confidenceLevel = "low";
-  } else if (missingParams === 1 || (imageResult && imageResult.confidence < 0.8)) {
-    confidenceLevel = "medium";
-  }
-
-  const buffer = confidenceLevel === "high" ? 0.15
-               : confidenceLevel === "medium" ? 0.25 : 0.4;
+  const buffer = confidenceBuffer(confidenceScore);
 
   return {
-    estimatedMinutes: total,
-    rangeMin: Math.round(total * (1 - buffer / 2)),
-    rangeMax: Math.round(total * (1 + buffer)),
-    confidenceLevel,
+    estimatedDurationMinutes,
+    rangeMinMinutes: Math.round(estimatedDurationMinutes * (1 - buffer / 2)),
+    rangeMaxMinutes: Math.round(estimatedDurationMinutes * (1 + buffer)),
+    confidenceScore,
     breakdown,
-    flags,
-    imageValidationNotes: imageResult?.validationFlags ?? []
+    notices,
   };
 }

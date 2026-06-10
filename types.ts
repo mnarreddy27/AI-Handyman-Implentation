@@ -29,3 +29,25 @@ export interface FinalEstimateResponse {
   reconciledParams: TVInstallParams;
   notices: string[];
 }
+
+/** Resolved parameters used by the estimation engine after orchestration reconciliation. */
+export interface CompiledInstallParams extends TVInstallParams {
+  existingMount: boolean;
+  outletPosition: ImageAnalysisResult["outletPosition"];
+  obstaclesDetected: string[];
+}
+
+export interface EstimationResult {
+  estimatedDurationMinutes: number;
+  rangeMinMinutes: number;
+  rangeMaxMinutes: number;
+  confidenceScore: number;
+  breakdown: Record<string, number>;
+  notices: string[];
+}
+
+export interface TVInstallEstimateOutput extends FinalEstimateResponse {
+  rangeMinMinutes: number;
+  rangeMaxMinutes: number;
+  breakdown: Record<string, number>;
+}
