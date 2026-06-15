@@ -1,3 +1,4 @@
+import {GoogleGenAI} from "@google/genai";
 import { analyzeInstallImage } from "./imageAnalysis";
 import { estimateInstallTime } from "./estimationEngine";
 import {
@@ -8,6 +9,8 @@ import {
 } from "./types";
 
 type MediaType = "image/jpeg" | "image/png" | "image/webp";
+
+const ai = new GoogleGenAI({apiKey: process.env.GEMINI_API_KEY });
 
 const DEFAULT_PARAMS: TVInstallParams = {
   tvWidth: 48,
@@ -70,20 +73,21 @@ function reconcileInstallParams(
   for (const key of TV_PARAM_KEYS) {
     const userValue = userInput[key];
     const imageValue = imageOverrides[key];
-
+  
+    // 💡 FIX: If there's a conflict, let the Image (AI) win, or use smart verification logic
     if (!isBlank(userValue) && !isBlank(imageValue) && valuesConflict(userValue, imageValue)) {
       notices.push(
-        `Using your ${key} value (${String(userValue)}) over AI suggestion (${String(imageValue)}).`
+        `⚠️ Mismatch found! AI overrode user input for ${key}. User said '${String(userValue)}', but image indicates '${String(imageValue)}'.`
       );
-      reconciled[key] = userValue;
+      reconciled[key] = imageValue; // 👈 Let the Image truth win the calculation
       continue;
     }
-
+  
     if (!isBlank(userValue)) {
       reconciled[key] = userValue;
       continue;
     }
-
+  
     if (!isBlank(imageValue)) {
       reconciled[key] = imageValue;
       notices.push(`Filled missing ${key} from photo analysis.`);
