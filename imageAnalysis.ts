@@ -1,173 +1,184 @@
+/**
+ * imageAnalysis.ts
+ *
+ * Analyzes one or more photos for any handyman task using Gemini Vision.
+ * Returns observations, parameter inferences, validation flags,
+ * and additional complexity detected from the images.
+ */
+
 import { GoogleGenAI, Type } from "@google/genai";
-import { ImageAnalysisResult, TVInstallParams } from "./types";
+import { TaskDefinition, TaskParams } from "./taskRegistry";
+import { ImageAnalysisResult } from "./types";
 
 const ai = new GoogleGenAI({});
 
-const WALL_MATERIALS = [
-  "drywall",
-  "brick",
-  "concrete",
-  "tile",
-  "plaster",
-  "unknown",
-] as const;
+// ─── Gemini response schema ──────────────────────────────────────────────────
 
-const MOUNT_TYPES = ["fixed", "tilting", "full_motion"] as const;
-
-const WIRE_CONCEALMENT = ["none", "external_track", "in_wall"] as const;
-
-const OUTLET_POSITIONS = ["behind_tv_area", "nearby", "far", "unknown"] as const;
-
-/** Strict Gemini schema aligned 1:1 with ImageAnalysisResult. */
-const IMAGE_ANALYSIS_RESPONSE_SCHEMA = {
+const IMAGE_ANALYSIS_SCHEMA = {
   type: Type.OBJECT,
   properties: {
-    wallType: {
-      type: Type.STRING,
-      enum: [...WALL_MATERIALS],
-      description: "Primary wall surface material visible at the mount location.",
-    },
-    outletVisible: {
-      type: Type.BOOLEAN,
-      description: "Whether a power outlet is visible in the photo.",
-    },
-    outletPosition: {
-      type: Type.STRING,
-      enum: [...OUTLET_POSITIONS],
-      description: "Relative position of the nearest visible outlet to the TV area.",
-    },
-    obstaclesDetected: {
+    observations: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "Physical obstacles that may complicate installation.",
-    },
-    existingMount: {
-      type: Type.BOOLEAN,
-      description: "Whether an existing TV mount bracket is already on the wall.",
-    },
-    aboveFireplace: {
-      type: Type.BOOLEAN,
-      description: "Whether the mount location appears to be above a fireplace.",
-    },
-    estimatedMountHeight: {
-      type: Type.INTEGER,
-      nullable: true,
-      description: "Estimated mount center height in inches from the floor, or null if unclear.",
+      description: "List of concrete visual observations relevant to the installation or repair task.",
     },
     confidence: {
       type: Type.NUMBER,
-      description: "Overall confidence score from 0.0 to 1.0.",
+      description: "Overall confidence from 0.0 to 1.0 in the image analysis.",
     },
     parameterOverrides: {
       type: Type.OBJECT,
-      properties: {
-        tvWidth: { type: Type.NUMBER },
-        tvHeight: { type: Type.NUMBER },
-        tvDepth: { type: Type.NUMBER },
-        tvDiagonal: { type: Type.NUMBER },
-        wallMaterial: { type: Type.STRING, enum: [...WALL_MATERIALS] },
-        mountType: { type: Type.STRING, enum: [...MOUNT_TYPES] },
-        mountHeight: { type: Type.NUMBER },
-        aboveFireplace: { type: Type.BOOLEAN },
-        wireConcealment: { type: Type.STRING, enum: [...WIRE_CONCEALMENT] },
-      },
-      propertyOrdering: [
-        "tvWidth",
-        "tvHeight",
-        "tvDepth",
-        "tvDiagonal",
-        "wallMaterial",
-        "mountType",
-        "mountHeight",
-        "aboveFireplace",
-        "wireConcealment",
-      ],
-      description: "Only populate fields you can infer from the image; leave others absent.",
+      description:
+        "Key-value pairs where keys match the task's parameter keys. " +
+        "Only include fields you can confidently infer from the image(s). " +
+        "Values should match the expected type (string, number, or boolean).",
+      additionalProperties: true,
     },
     validationFlags: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "Warnings or validation notes for the installer.",
+      description:
+        "Conflicts between what the image shows and what the user provided. " +
+        "Each item is a human-readable note like: " +
+        "'User said drywall but image shows brick wall.'",
+    },
+    additionalComplexityMinutes: {
+      type: Type.INTEGER,
+      description:
+        "Extra minutes to add beyond the standard param-based estimate, " +
+        "due to issues visible in the photo that no parameter captures. " +
+        "E.g. cluttered work area (+10), water damage requiring treatment (+20). " +
+        "Use 0 if no additional complexity is detected.",
+    },
+    installerNotes: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        "Practical notes for the installer about what they'll encounter on-site. " +
+        "Be specific and actionable.",
+    },
+    inferredTaskType: {
+      type: Type.STRING,
+      nullable: true,
+      description:
+        "Only for 'other' tasks: your best description of what the task actually is " +
+        "(e.g. 'bathroom tile regrouting', 'exterior light fixture replacement').",
+    },
+    inferredComplexity: {
+      type: Type.STRING,
+      enum: ["simple", "moderate", "complex"],
+      nullable: true,
+      description: "Only for 'other' tasks: inferred complexity level.",
     },
   },
   required: [
-    "wallType",
-    "outletVisible",
-    "outletPosition",
-    "obstaclesDetected",
-    "existingMount",
-    "aboveFireplace",
-    "estimatedMountHeight",
+    "observations",
     "confidence",
     "parameterOverrides",
     "validationFlags",
-  ],
-  propertyOrdering: [
-    "wallType",
-    "outletVisible",
-    "outletPosition",
-    "obstaclesDetected",
-    "existingMount",
-    "aboveFireplace",
-    "estimatedMountHeight",
-    "confidence",
-    "parameterOverrides",
-    "validationFlags",
+    "additionalComplexityMinutes",
+    "installerNotes",
   ],
 };
 
-function stripBase64Prefix(base64Image: string): string {
-  const dataUrlMatch = base64Image.match(/^data:[^;]+;base64,(.+)$/);
-  return dataUrlMatch ? dataUrlMatch[1] : base64Image;
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function stripBase64Prefix(base64: string): string {
+  const match = base64.match(/^data:[^;]+;base64,(.+)$/);
+  return match ? match[1] : base64;
 }
 
-function buildAnalysisPrompt(userParams: Partial<TVInstallParams>): string {
-  return `You are an expert TV installation estimator analyzing a photo of an installation site.
-Analyze this image and populate the JSON schema with your visual findings.
+function buildPrompt(
+  task: TaskDefinition,
+  userParams: TaskParams,
+  imageCount: number
+): string {
+  const paramLines = Object.entries(userParams)
+    .map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`)
+    .join("\n");
 
-Use the user-provided values below as context, but still report what you actually see in the photo.
-Only include fields inside parameterOverrides when you can infer them from the image.
+  return `You are an expert handyman estimator analyzing ${imageCount > 1 ? `${imageCount} photos` : "a photo"} of a job site.
 
-User stated wall type: ${userParams.wallMaterial ?? "not specified"}
-User stated mount height (inches): ${userParams.mountHeight ?? "not specified"}
-User stated above fireplace: ${userParams.aboveFireplace ?? "not specified"}
-User stated TV diagonal (inches): ${userParams.tvDiagonal ?? "not specified"}
-User stated mount type: ${userParams.mountType ?? "not specified"}
-User stated wire concealment: ${userParams.wireConcealment ?? "not specified"}`;
+TASK: ${task.label}
+TASK DESCRIPTION: ${task.imageHints}
+
+USER-PROVIDED PARAMETERS:
+${paramLines || "  (none provided)"}
+
+INSTRUCTIONS:
+1. Analyze the image(s) carefully for details relevant to this specific task.
+2. Populate parameterOverrides ONLY for fields you can confidently infer from the image.
+   - For the "other" task, infer as much as possible (materials, scope, access, complexity).
+   - Parameter keys must exactly match the task's parameter keys listed above.
+3. Note any conflicts between what the user stated and what the image shows in validationFlags.
+4. Set additionalComplexityMinutes for issues the standard parameters don't capture
+   (poor access, unexpected damage, hazardous conditions, site complexity, etc.).
+5. Write actionable installerNotes — things the technician should know before arrival.
+6. Set confidence between 0.0 (very unclear photo) and 1.0 (crystal clear, high certainty).
+
+Return only valid JSON matching the schema. Be specific and honest — do not guess if the image is unclear.`;
 }
 
-export async function analyzeInstallImage(
-  base64Image: string,
-  mediaType: "image/jpeg" | "image/png" | "image/webp" = "image/jpeg",
-  userParams: Partial<TVInstallParams> = {}
+// ─── Multi-image analysis ────────────────────────────────────────────────────
+
+export interface PhotoInput {
+  base64: string;
+  mediaType: "image/jpeg" | "image/png" | "image/webp";
+}
+
+export async function analyzeJobPhotos(
+  photos: PhotoInput[],
+  task: TaskDefinition,
+  userParams: TaskParams = {}
 ): Promise<ImageAnalysisResult> {
-  const prompt = buildAnalysisPrompt(userParams);
-  const imageData = stripBase64Prefix(base64Image);
+  if (photos.length === 0) {
+    return {
+      observations: [],
+      confidence: 0,
+      parameterOverrides: {},
+      validationFlags: [],
+      additionalComplexityMinutes: 0,
+      installerNotes: [],
+    };
+  }
+
+  const prompt = buildPrompt(task, userParams, photos.length);
+
+  // Build the content array: prompt text + all images
+  const contents: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [
+    { text: prompt },
+    ...photos.map((photo) => ({
+      inlineData: {
+        data: stripBase64Prefix(photo.base64),
+        mimeType: photo.mediaType,
+      },
+    })),
+  ];
 
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
-    contents: [
-      { text: prompt },
-      { inlineData: { data: imageData, mimeType: mediaType } },
-    ],
+    contents,
     config: {
       responseMimeType: "application/json",
-      responseJsonSchema: IMAGE_ANALYSIS_RESPONSE_SCHEMA,
+      responseJsonSchema: IMAGE_ANALYSIS_SCHEMA,
       temperature: 0.2,
     },
   });
 
   if (!response.text) {
-    throw new Error("Gemini returned an empty response for image analysis.");
+    throw new Error("Gemini returned an empty response during image analysis.");
   }
 
   const parsed = JSON.parse(response.text) as ImageAnalysisResult;
 
   return {
-    ...parsed,
-    confidence: Math.min(1, Math.max(0, parsed.confidence)),
+    observations: parsed.observations ?? [],
+    confidence: Math.min(1, Math.max(0, parsed.confidence ?? 0.5)),
     parameterOverrides: parsed.parameterOverrides ?? {},
     validationFlags: parsed.validationFlags ?? [],
-    obstaclesDetected: parsed.obstaclesDetected ?? [],
+    additionalComplexityMinutes: Math.max(0, parsed.additionalComplexityMinutes ?? 0),
+    installerNotes: parsed.installerNotes ?? [],
+    inferredTaskType: parsed.inferredTaskType ?? undefined,
+    inferredComplexity: parsed.inferredComplexity ?? undefined,
   };
 }

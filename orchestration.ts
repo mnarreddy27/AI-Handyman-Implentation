@@ -1,175 +1,176 @@
-import {GoogleGenAI} from "@google/genai";
-import { analyzeInstallImage } from "./imageAnalysis";
-import { estimateInstallTime } from "./estimationEngine";
-import {
-  CompiledInstallParams,
-  ImageAnalysisResult,
-  TVInstallEstimateOutput,
-  TVInstallParams,
-} from "./types";
+/**
+ * orchestration.ts
+ *
+ * Orchestrates the full estimation pipeline for any handyman task:
+ *   1. Validate the task ID against the registry
+ *   2. Analyze job site photos (one or many)
+ *   3. Reconcile user params + image inferences (image wins on conflict)
+ *   4. Run the estimation engine
+ *   5. Return the unified output
+ */
 
-type MediaType = "image/jpeg" | "image/png" | "image/webp";
+import { analyzeJobPhotos, PhotoInput } from "./imageAnalysis";
+import { estimateTaskTime } from "./estimationEngine";
+import { getTask } from "./taskRegistry";
+import { TaskParams } from "./taskRegistry";
+import { HandymanEstimateOutput, ImageAnalysisResult } from "./types";
 
-const ai = new GoogleGenAI({apiKey: process.env.GEMINI_API_KEY });
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_PARAMS: TVInstallParams = {
-  tvWidth: 48,
-  tvHeight: 28,
-  tvDepth: 2.5,
-  tvDiagonal: 55,
-  wallMaterial: "drywall",
-  mountType: "fixed",
-  mountHeight: 60,
-  aboveFireplace: false,
-  wireConcealment: "none",
-};
-
-const TV_PARAM_KEYS: (keyof TVInstallParams)[] = [
-  "tvWidth",
-  "tvHeight",
-  "tvDepth",
-  "tvDiagonal",
-  "wallMaterial",
-  "mountType",
-  "mountHeight",
-  "aboveFireplace",
-  "wireConcealment",
-];
-
-function isBlank<T>(value: T | undefined | null): value is undefined | null {
-  return value === undefined || value === null;
+function isBlank(value: unknown): boolean {
+  return value === undefined || value === null || value === "";
 }
 
-function valuesConflict<T>(left: T, right: T): boolean {
-  return left !== right;
-}
-
-function inferImageOverrides(image: ImageAnalysisResult): Partial<TVInstallParams> {
-  const inferred: Partial<TVInstallParams> = { ...image.parameterOverrides };
-
-  if (isBlank(inferred.wallMaterial) && image.wallType !== "unknown") {
-    inferred.wallMaterial = image.wallType;
-  }
-
-  if (isBlank(inferred.aboveFireplace)) {
-    inferred.aboveFireplace = image.aboveFireplace;
-  }
-
-  if (isBlank(inferred.mountHeight) && image.estimatedMountHeight != null) {
-    inferred.mountHeight = image.estimatedMountHeight;
-  }
-
-  return inferred;
-}
-
-function reconcileInstallParams(
-  userInput: Partial<TVInstallParams>,
-  image: ImageAnalysisResult | null
-): { params: CompiledInstallParams; notices: string[]; confidenceScore: number } {
-  const notices: string[] = [];
-  const imageOverrides = image ? inferImageOverrides(image) : {};
-  const reconciled: Partial<TVInstallParams> = { ...userInput };
-
-  for (const key of TV_PARAM_KEYS) {
-    const userValue = userInput[key];
-    const imageValue = imageOverrides[key];
-  
-    // 💡 FIX: If there's a conflict, let the Image (AI) win, or use smart verification logic
-    if (!isBlank(userValue) && !isBlank(imageValue) && valuesConflict(userValue, imageValue)) {
-      notices.push(
-        `⚠️ Mismatch found! AI overrode user input for ${key}. User said '${String(userValue)}', but image indicates '${String(imageValue)}'.`
-      );
-      reconciled[key] = imageValue; // 👈 Let the Image truth win the calculation
-      continue;
-    }
-  
-    if (!isBlank(userValue)) {
-      reconciled[key] = userValue;
-      continue;
-    }
-  
-    if (!isBlank(imageValue)) {
-      reconciled[key] = imageValue;
-      notices.push(`Filled missing ${key} from photo analysis.`);
-      continue;
-    }
-  }
-
-  const finalTvParams: TVInstallParams = {
-    tvWidth: reconciled.tvWidth ?? DEFAULT_PARAMS.tvWidth,
-    tvHeight: reconciled.tvHeight ?? DEFAULT_PARAMS.tvHeight,
-    tvDepth: reconciled.tvDepth ?? DEFAULT_PARAMS.tvDepth,
-    tvDiagonal: reconciled.tvDiagonal ?? DEFAULT_PARAMS.tvDiagonal,
-    wallMaterial: reconciled.wallMaterial ?? DEFAULT_PARAMS.wallMaterial,
-    mountType: reconciled.mountType ?? DEFAULT_PARAMS.mountType,
-    mountHeight: reconciled.mountHeight ?? DEFAULT_PARAMS.mountHeight,
-    aboveFireplace: reconciled.aboveFireplace ?? DEFAULT_PARAMS.aboveFireplace,
-    wireConcealment: reconciled.wireConcealment ?? DEFAULT_PARAMS.wireConcealment,
-  };
-
-  const compiled: CompiledInstallParams = {
-    ...finalTvParams,
-    existingMount: image?.existingMount ?? false,
-    outletPosition: image?.outletPosition ?? "unknown",
-    obstaclesDetected: image?.obstaclesDetected ?? [],
-  };
-
-  if (image) {
-    notices.push(...image.validationFlags);
-
-    if (!image.outletVisible) {
-      notices.push("No outlet visible in photo — verify power location on site.");
-    }
-  }
-
-  const missingUserFields = TV_PARAM_KEYS.filter((key) => isBlank(userInput[key])).length;
-  const imageConfidence = image?.confidence ?? 0.55;
-  const completenessBoost = Math.max(0, 1 - missingUserFields * 0.08);
-  const confidenceScore = Math.min(1, Math.max(0.35, imageConfidence * completenessBoost));
-
-  return { params: compiled, notices, confidenceScore };
+function valuesConflict(a: unknown, b: unknown): boolean {
+  return String(a) !== String(b);
 }
 
 /**
- * Orchestrates image analysis (when provided), parameter reconciliation, and estimation.
+ * Merge user-supplied params with image inferences.
+ * Rules:
+ *   - Image wins on conflict (more reliable for visual properties).
+ *   - Image fills in missing user params silently.
+ *   - Conflicts are surfaced as notices.
  */
-export async function orchestrateTVInstallEstimate(
-  userInput: Partial<TVInstallParams>,
-  imageBase64?: string,
-  imageMediaType: MediaType = "image/jpeg"
-): Promise<TVInstallEstimateOutput> {
-  let imageResult: ImageAnalysisResult | null = null;
+function reconcileParams(
+  userParams: TaskParams,
+  imageResult: ImageAnalysisResult | null,
+  taskParamKeys: string[]
+): { reconciled: TaskParams; notices: string[] } {
+  const notices: string[] = [];
+  const imageOverrides = imageResult?.parameterOverrides ?? {};
+  const reconciled: TaskParams = { ...userParams };
 
-  if (imageBase64) {
-    imageResult = await analyzeInstallImage(imageBase64, imageMediaType, userInput);
+  for (const key of taskParamKeys) {
+    const userVal = userParams[key];
+    const imageVal = imageOverrides[key];
+
+    if (!isBlank(userVal) && !isBlank(imageVal) && valuesConflict(userVal, imageVal)) {
+      notices.push(
+        `⚠️ Mismatch on "${key}": user said "${userVal}" but photo indicates "${imageVal}" — using photo value.`
+      );
+      reconciled[key] = imageVal;
+      continue;
+    }
+
+    if (!isBlank(userVal)) {
+      reconciled[key] = userVal;
+      continue;
+    }
+
+    if (!isBlank(imageVal)) {
+      reconciled[key] = imageVal;
+      notices.push(`📷 "${key}" filled from photo analysis: ${imageVal}`);
+    }
   }
 
-  const { params, notices, confidenceScore } = reconcileInstallParams(userInput, imageResult);
-  const estimation = estimateInstallTime(params, confidenceScore);
+  return { reconciled, notices };
+}
 
-  const { tvWidth, tvHeight, tvDepth, tvDiagonal, wallMaterial, mountType, mountHeight, aboveFireplace, wireConcealment } =
-    params;
+/**
+ * Calculate overall confidence score.
+ * Starts at the image confidence, then penalizes for missing user params.
+ */
+function calcConfidence(
+  userParams: TaskParams,
+  imageResult: ImageAnalysisResult | null,
+  taskParamKeys: string[]
+): number {
+  const imageConfidence = imageResult?.confidence ?? 0.55;
+  const requiredKeys = taskParamKeys.filter(k => !k.startsWith("optional"));
+  const missingCount = requiredKeys.filter(k => isBlank(userParams[k])).length;
+  const completenessBoost = Math.max(0, 1 - missingCount * 0.08);
+  return Math.min(1, Math.max(0.35, imageConfidence * completenessBoost));
+}
 
+// ─── Main orchestrator ────────────────────────────────────────────────────────
+
+export async function estimateHandymanTask(
+  taskId: string,
+  userParams: TaskParams,
+  photos: PhotoInput[] = []
+): Promise<HandymanEstimateOutput> {
+
+  // 1. Look up the task
+  const task = getTask(taskId);
+  if (!task) {
+    throw new Error(`Unknown task ID: "${taskId}". Check taskRegistry.ts for valid IDs.`);
+  }
+
+  const taskParamKeys = task.params.map(p => p.key);
+
+  // 2. Analyze photos (supports 0 to N images)
+  let imageResult: ImageAnalysisResult | null = null;
+
+  if (photos.length > 0) {
+    imageResult = await analyzeJobPhotos(photos, task, userParams);
+  }
+
+  // 3. Reconcile params
+  const { reconciled, notices: reconcileNotices } = reconcileParams(
+    userParams,
+    imageResult,
+    taskParamKeys
+  );
+
+  // 4. Collect all notices
+  const allNotices: string[] = [
+    ...reconcileNotices,
+    ...(imageResult?.validationFlags ?? []),
+    ...(imageResult?.installerNotes ?? []),
+  ];
+
+  // 5. Confidence score
+  const confidenceScore = calcConfidence(userParams, imageResult, taskParamKeys);
+
+  // 6. Run estimation
+  const estimation = estimateTaskTime(
+    task.id,
+    task.baseMinutes,
+    reconciled,
+    confidenceScore,
+    imageResult?.additionalComplexityMinutes ?? 0
+  );
+
+  // Merge estimation notices
+  allNotices.push(...estimation.notices);
+
+  // 7. Build output
   return {
+    taskId: task.id,
+    taskLabel: task.label,
+
     estimatedDurationMinutes: estimation.estimatedDurationMinutes,
     rangeMinMinutes: estimation.rangeMinMinutes,
     rangeMaxMinutes: estimation.rangeMaxMinutes,
     confidenceScore: estimation.confidenceScore,
-    reconciledParams: {
-      tvWidth,
-      tvHeight,
-      tvDepth,
-      tvDiagonal,
-      wallMaterial,
-      mountType,
-      mountHeight,
-      aboveFireplace,
-      wireConcealment,
-    },
-    notices: [...notices, ...estimation.notices],
+
+    reconciledParams: reconciled,
+    notices: [...new Set(allNotices)], // deduplicate
+
     breakdown: estimation.breakdown,
+
+    imageInsights: imageResult
+      ? {
+          observations: imageResult.observations,
+          installerNotes: imageResult.installerNotes,
+          additionalComplexityMinutes: imageResult.additionalComplexityMinutes,
+          inferredTaskType: imageResult.inferredTaskType,
+        }
+      : undefined,
   };
 }
 
-/** Backward-compatible alias for callers expecting the previous orchestrator name. */
-export const runTVInstallEstimate = orchestrateTVInstallEstimate;
+// ─── Backward-compatible alias for TV-specific callers ────────────────────────
+
+export async function orchestrateTVInstallEstimate(
+  userParams: TaskParams,
+  imageBase64?: string,
+  imageMediaType: PhotoInput["mediaType"] = "image/jpeg"
+): Promise<HandymanEstimateOutput> {
+  const photos: PhotoInput[] = imageBase64
+    ? [{ base64: imageBase64, mediaType: imageMediaType }]
+    : [];
+
+  return estimateHandymanTask("tv_installation", userParams, photos);
+}
