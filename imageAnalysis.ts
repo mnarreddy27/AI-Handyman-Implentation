@@ -4,13 +4,36 @@
  * Analyzes one or more photos for any handyman task using Gemini Vision.
  * Returns observations, parameter inferences, validation flags,
  * and additional complexity detected from the images.
+ *
+ * Resilience additions:
+ *   - Retry with exponential backoff on transient Gemini failures (429/5xx/timeout)
+ *   - Hard timeout so a hung request doesn't block the estimate forever
+ *   - Result caching so identical (photo + task + params) calls skip the API entirely
+ *   - Defensive JSON parsing — a malformed Gemini response throws a typed error
+ *     instead of crashing the process
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { TaskDefinition, TaskParams } from "./taskRegistry";
 import { ImageAnalysisResult } from "./types";
+import { ImageAnalysisError, GeminiResponseParseError, withRetry, withTimeout } from "./errors";
+import { buildCacheKey, getCached, setCached } from "./cache";
 
-const ai = new GoogleGenAI({});
+function getClient(): GoogleGenAI {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new ImageAnalysisError(
+      "GOOGLE_API_KEY is not set. Copy .env.example to .env and add your Gemini API key.",
+      { retryable: false }
+    );
+  }
+  return new GoogleGenAI({ apiKey });
+}
+
+const GEMINI_MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES ?? 3);
+const GEMINI_RETRY_BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS ?? 500);
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS ?? 30_000);
+const CACHE_TTL_SECONDS = Number(process.env.IMAGE_ANALYSIS_CACHE_TTL_SECONDS ?? 3600);
 
 // ─── Gemini response schema ──────────────────────────────────────────────────
 
@@ -119,6 +142,53 @@ INSTRUCTIONS:
 Return only valid JSON matching the schema. Be specific and honest — do not guess if the image is unclear.`;
 }
 
+function safeParseGeminiJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new GeminiResponseParseError(
+      `Gemini returned malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
+      text.slice(0, 500) // truncate so logs/errors don't balloon
+    );
+  }
+}
+
+function normalizeResult(parsed: any): ImageAnalysisResult {
+  return {
+    observations: Array.isArray(parsed?.observations) ? parsed.observations : [],
+    confidence: clamp(Number(parsed?.confidence ?? 0.5), 0, 1),
+    parameterOverrides: typeof parsed?.parameterOverrides === "object" && parsed.parameterOverrides !== null
+      ? parsed.parameterOverrides
+      : {},
+    validationFlags: Array.isArray(parsed?.validationFlags) ? parsed.validationFlags : [],
+    additionalComplexityMinutes: Math.max(0, Number(parsed?.additionalComplexityMinutes ?? 0)),
+    installerNotes: Array.isArray(parsed?.installerNotes) ? parsed.installerNotes : [],
+    inferredTaskType: typeof parsed?.inferredTaskType === "string" ? parsed.inferredTaskType : undefined,
+    inferredComplexity: ["simple", "moderate", "complex"].includes(parsed?.inferredComplexity)
+      ? parsed.inferredComplexity
+      : undefined,
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+/** A safe fallback result used when Gemini fails after all retries are exhausted. */
+function degradedFallbackResult(reason: string): ImageAnalysisResult {
+  return {
+    observations: [],
+    confidence: 0,
+    parameterOverrides: {},
+    validationFlags: [],
+    additionalComplexityMinutes: 0,
+    installerNotes: [
+      `Photo analysis unavailable (${reason}). Estimate is based on submitted parameters only — confirm details on-site.`,
+    ],
+  };
+}
+
 // ─── Multi-image analysis ────────────────────────────────────────────────────
 
 export interface PhotoInput {
@@ -126,10 +196,16 @@ export interface PhotoInput {
   mediaType: "image/jpeg" | "image/png" | "image/webp";
 }
 
+export interface AnalyzeOptions {
+  /** If true, throws on Gemini failure instead of returning a degraded fallback result. */
+  throwOnFailure?: boolean;
+}
+
 export async function analyzeJobPhotos(
   photos: PhotoInput[],
   task: TaskDefinition,
-  userParams: TaskParams = {}
+  userParams: TaskParams = {},
+  options: AnalyzeOptions = {}
 ): Promise<ImageAnalysisResult> {
   if (photos.length === 0) {
     return {
@@ -142,9 +218,15 @@ export async function analyzeJobPhotos(
     };
   }
 
+  // ── Cache check ──────────────────────────────────────────────────────────
+  const cacheKey = buildCacheKey(task.id, photos.map(p => p.base64), userParams);
+  const cached = getCached(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const prompt = buildPrompt(task, userParams, photos.length);
 
-  // Build the content array: prompt text + all images
   const contents: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [
     { text: prompt },
     ...photos.map((photo) => ({
@@ -155,30 +237,62 @@ export async function analyzeJobPhotos(
     })),
   ];
 
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents,
-    config: {
-      responseMimeType: "application/json",
-      responseJsonSchema: IMAGE_ANALYSIS_SCHEMA,
-      temperature: 0.2,
-    },
-  });
+  try {
+    const result = await withRetry(
+      async () => {
+        const ai = getClient();
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents,
+            config: {
+              responseMimeType: "application/json",
+              responseJsonSchema: IMAGE_ANALYSIS_SCHEMA,
+              temperature: 0.2,
+            },
+          }),
+          GEMINI_TIMEOUT_MS
+        );
 
-  if (!response.text) {
-    throw new Error("Gemini returned an empty response during image analysis.");
+        if (!response.text) {
+          // Empty response is often transient (safety filter, truncation) — treat as retryable
+          throw new ImageAnalysisError("Gemini returned an empty response", { retryable: true });
+        }
+
+        const parsed = safeParseGeminiJson(response.text);
+        return normalizeResult(parsed);
+      },
+      {
+        maxRetries: GEMINI_MAX_RETRIES,
+        baseDelayMs: GEMINI_RETRY_BASE_DELAY_MS,
+        onRetry: (attempt, error) => {
+          console.warn(
+            `[imageAnalysis] Retry ${attempt}/${GEMINI_MAX_RETRIES} for task "${task.id}" after error:`,
+            error instanceof Error ? error.message : error
+          );
+        },
+      }
+    );
+
+    setCached(cacheKey, result, CACHE_TTL_SECONDS);
+    return result;
+
+  } catch (error) {
+    console.error(`[imageAnalysis] Failed for task "${task.id}" after retries:`, error);
+
+    if (options.throwOnFailure) {
+      if (error instanceof ImageAnalysisError || error instanceof GeminiResponseParseError) {
+        throw error;
+      }
+      throw new ImageAnalysisError(
+        `Image analysis failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error, retryable: false }
+      );
+    }
+
+    // Default behavior: degrade gracefully so a Gemini outage doesn't break
+    // the whole estimate — the user still gets a time estimate from params alone.
+    const reason = error instanceof Error ? error.message : "unknown error";
+    return degradedFallbackResult(reason);
   }
-
-  const parsed = JSON.parse(response.text) as ImageAnalysisResult;
-
-  return {
-    observations: parsed.observations ?? [],
-    confidence: Math.min(1, Math.max(0, parsed.confidence ?? 0.5)),
-    parameterOverrides: parsed.parameterOverrides ?? {},
-    validationFlags: parsed.validationFlags ?? [],
-    additionalComplexityMinutes: Math.max(0, parsed.additionalComplexityMinutes ?? 0),
-    installerNotes: parsed.installerNotes ?? [],
-    inferredTaskType: parsed.inferredTaskType ?? undefined,
-    inferredComplexity: parsed.inferredComplexity ?? undefined,
-  };
 }
