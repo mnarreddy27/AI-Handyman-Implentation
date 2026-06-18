@@ -71,107 +71,69 @@ async function runTests() {
   console.log("🚀 Handyman Estimator — Multi-Task Test Suite\n");
   console.log(`📋 Registry contains ${TASK_REGISTRY.length} tasks\n`);
 
-  // ── Test 1: TV installation with a single URL photo ───────────────────────
   try {
-    console.log("── Test 1: TV Installation (single photo, URL) ───────────────");
-    const photos = await loadPhotos([
-      "https://www.tvinstallationone.com/assets/img/blogimg/b10_TV-Above-Fireplace.webp",
-    ]);
-
-    const result = await estimateHandymanTask("tv_installation", {
-      tvDiagonal: 65,
-      wallMaterial: "drywall",   // image should override this to brick or stone
-      mountType: "tilting",
-      mountHeight: 60,
-      aboveFireplace: false,     // image should override this to true
-      wireConcealment: "in_wall",
-    }, photos);
-
+    console.log("── Test 1: Cabinet Painting (Blank Parameters) ─────────────");
+    
+    const photos = await loadPhotos(["CabinetOne.jpeg", "CabinetTwo.jpeg"]); 
+  
+    
+    const result = await estimateHandymanTask("cabinet_painting", {}, photos);
+  
     printResult(result);
   } catch (err) {
     console.error("  ❌ Test 1 failed:", err);
   }
 
-  // ── Test 2: Furniture assembly, no photos ─────────────────────────────────
   try {
-    console.log("── Test 2: Furniture Assembly (no photos) ─────────────────────");
-    const result = await estimateHandymanTask("furniture_assembly", {
-      furnitureType: "wardrobe",
-      itemCount: 2,
-      boxCount: 8,
-      hasInstructions: true,
-      roomIsAccessible: false,
-    });
+    console.log("── Test 2: Cabinet Painting (Blank Parameters) ─────────────");
+    
+    const photos = await loadPhotos(["CabinetOne.jpeg"]); 
+  
+    
+    const result = await estimateHandymanTask("cabinet_painting", {}, photos);
+  
     printResult(result);
   } catch (err) {
     console.error("  ❌ Test 2 failed:", err);
   }
 
-  // ── Test 3: Bathroom caulking with multiple local photos ──────────────────
-  // Swap these paths for real local files, or use URLs
   try {
-    console.log("── Test 3: Caulking (multi-photo — using placeholder URL) ──────");
-    const photos = await loadPhotos([
-      "https://images.unsplash.com/photo-1552321554-5fefe8c9ef14?w=800",
-      "https://images.unsplash.com/photo-1584622781564-1d987f7333c1?w=800",
-    ]);
-
-    const result = await estimateHandymanTask("caulking", {
-      location: ["tub_surround", "bathroom_sink"],
-      linearFeet: 25,
-      existingCondition: "moldy_needs_treatment",
-    }, photos);
-
+    console.log("── Test 3: Toilet Replacement (Blank Parameters) ─────────────");
+    
+    const photos = await loadPhotos(["ToiletOne.jpeg", "ToiletTwo.jpeg"]); 
+  
+    
+    const result = await estimateHandymanTask("toilet_seat_replacement", {}, photos);
+  
     printResult(result);
   } catch (err) {
     console.error("  ❌ Test 3 failed:", err);
   }
 
-  // ── Test 4: Smart thermostat (single photo) ───────────────────────────────
   try {
-    console.log("── Test 4: Smart Thermostat (params only, no photos) ──────────");
-    const result = await estimateHandymanTask("smart_home_device", {
-      deviceType: "smart_thermostat",
-      replacingExisting: true,
-      wiringAvailable: true,
-    });
+    console.log("── Test 4: Toilet Replacement (Blank Parameters) ─────────────");
+    
+    const photos = await loadPhotos(["ToiletOne.jpeg"]); 
+  
+    
+    const result = await estimateHandymanTask("toilet_seat_replacement", {}, photos);
+  
     printResult(result);
   } catch (err) {
     console.error("  ❌ Test 4 failed:", err);
   }
 
-  // ── Test 5: "Other" task — fully AI-inferred ──────────────────────────────
-  try {
-    console.log("── Test 5: Other task — AI infers from description + photo ────");
-    const photos = await loadPhotos([
-      "https://images.unsplash.com/photo-1563861826100-9cb868fdbe1c?w=800",
-    ]);
+ 
 
-    const result = await estimateHandymanTask("other", {
-      taskDescription: "The exterior light fixture next to the garage door is loose and one bulb socket is broken. Needs to be fixed or replaced.",
-      estimatedComplexity: "moderate",
-    }, photos);
 
-    printResult(result);
-  } catch (err) {
-    console.error("  ❌ Test 5 failed:", err);
-  }
 
-  // ── Test 6: Backward-compat TV alias (existing callers won't break) ────────
-  try {
-    console.log("── Test 6: orchestrateTVInstallEstimate alias (backward compat)");
-    const result = await orchestrateTVInstallEstimate({
-      tvDiagonal: 55,
-      mountType: "fixed",
-      wallMaterial: "drywall",
-      wireConcealment: "none",
-    });
-    printResult(result);
-  } catch (err) {
-    console.error("  ❌ Test 6 failed:", err);
-  }
 
-  console.log("\n✅ All tests complete.");
-}
 
-runTests().catch(console.error);
+
+
+  
+
+   console.log("\n✅ All tests complete.");
+ }
+
+ runTests().catch(console.error);
