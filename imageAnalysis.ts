@@ -11,16 +11,15 @@
  * - Result caching so identical (media + task + params) calls skip the API entirely
  * - Defensive JSON parsing — a malformed Gemini response throws a typed error
  * instead of crashing the process
- * - Pre-flight HEIC interception to bypass native libheif security thresholds
+ * - Imports normalized assets from mediaConversion to handle HEIC/MOV transparently
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
-import sharp from "sharp";
-import heicDecode from "heic-decode";
 import { TaskDefinition, TaskParams } from "./taskRegistry";
 import { MediaAnalysisResult, MediaInput } from "./types";
 import { ImageAnalysisError, GeminiResponseParseError, withRetry, withTimeout } from "./errors";
 import { buildCacheKey, getCached, setCached } from "./cache";
+import { normalizeMediaForGemini } from "./mediaConversion";
 
 function getClient(): GoogleGenAI {
   const apiKey = process.env.GOOGLE_API_KEY;
@@ -35,7 +34,8 @@ function getClient(): GoogleGenAI {
 
 const GEMINI_MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES ?? 3);
 const GEMINI_RETRY_BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS ?? 500);
-const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS ?? 30_000);
+// Increased threshold from 30s to 90s to comfortably swallow larger converted video payloads
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS ?? 90_000);
 const CACHE_TTL_SECONDS = Number(process.env.IMAGE_ANALYSIS_CACHE_TTL_SECONDS ?? 3600);
 
 // ─── Gemini response schema ──────────────────────────────────────────────────
@@ -111,11 +111,9 @@ const MEDIA_ANALYSIS_SCHEMA = {
 
 function stripBase64Prefix(base64: string): string {
   if (!base64) return "";
-  
   if (base64.includes(",")) {
     return base64.split(",")[1];
   }
-  
   return base64.trim();
 }
 
@@ -130,13 +128,13 @@ function buildPrompt(
 
   const durationInstruction = task.id === "other"
     ? `CRITICAL TIME ESTIMATION RULE FOR 'OTHER' TASK:
-   Because this is an unclassified ('other') task, there is no system baseline time. 
-   You must populate the 'additionalComplexityMinutes' field with the TOTAL duration (in minutes) required 
-   for a professional handyman to complete the entire job from setup to cleanup. 
-   Do not provide a modifier; estimate the absolute total execution time (e.g., 120 for a 2-hour task).`
+       Because this is an unclassified ('other') task, there is no system baseline time. 
+       You must populate the 'additionalComplexityMinutes' field with the TOTAL duration (in minutes) required 
+       for a professional handyman to complete the entire job from setup to cleanup. 
+       Do not provide a modifier; estimate the absolute total execution time (e.g., 120 for a 2-hour task).`
     : `4. Set additionalComplexityMinutes for complications the standard parameters don't capture.
-   Examples: poor physical access, structural damage, surrounding hazards, heavy setup overhead, etc. 
-   This number will be added to a predefined baseline time.`;
+       Examples: poor physical access, structural damage, surrounding hazards, heavy setup overhead, etc. 
+       This number will be added to a predefined baseline time.`;
 
   return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) of a job site.
 
@@ -243,38 +241,25 @@ export async function analyzeJobMedia(
     return cached as MediaAnalysisResult;
   }
 
-  // ── Pre-flight HEIC Interception ──────────────────────────────────────────
-  // Concurrently process media items to flatten high-efficiency iPhone frames 
-  // into standard JPEGs, bypassing native libheif security reference traps.
+  // ── Unified Media Normalization Layer ─────────────────────────────────────
+  // Intercepts and flattens HEIC pictures and raw MOV video files into 
+  // Gemini-compliant payloads via mediaConversion utilities.
   const processedMediaItems = await Promise.all(
     mediaItems.map(async (item) => {
-      const mime = item.inlineData.mimeType.toLowerCase();
-      if (mime === "image/heic" || mime === "image/heif") {
-        try {
-          const rawBuffer = Buffer.from(stripBase64Prefix(item.inlineData.data), "base64");
-          
-          // Pure JavaScript decode avoiding native binary limits
-          const { width, height, data } = await heicDecode({ buffer: rawBuffer });
-          
-          // Flatten into a safe JPEG buffer via raw bytes
-          const jpegBuffer = await sharp(data, {
-            raw: { width, height, channels: 4 }
-          })
-          .jpeg()
-          .toBuffer();
+      try {
+        const rawBytes = Buffer.from(stripBase64Prefix(item.inlineData.data), "base64");
+        const converted = await normalizeMediaForGemini(rawBytes, item.inlineData.mimeType);
 
-          return {
-            inlineData: {
-              data: jpegBuffer.toString("base64"),
-              mimeType: "image/jpeg"
-            }
-          };
-        } catch (err) {
-          console.error(`[mediaAnalysis] Pre-flight HEIC conversion failed for asset. Falling back to raw stream:`, err);
-          return item;
-        }
+        return {
+          inlineData: {
+            data: converted.buffer.toString("base64"),
+            mimeType: converted.mimeType,
+          },
+        };
+      } catch (err) {
+        console.error(`[mediaAnalysis] Normalization step failed for asset. Using fallback raw layout:`, err);
+        return item;
       }
-      return item;
     })
   );
 

@@ -9,7 +9,7 @@
  * 5. Return the unified output
  */
 
-import { analyzeJobMedia } from "./imageAnalysis"; // points to your updated runner
+import { analyzeJobMedia } from "./imageAnalysis";
 import { estimateTaskTime } from "./estimationEngine";
 import { getTask } from "./taskRegistry";
 import { HandymanEstimateOutput, MediaAnalysisResult, MediaInput, TaskParams } from "./types";
@@ -59,7 +59,6 @@ function reconcileParams(
 
     if (!isBlank(mediaVal)) {
       reconciled[key] = mediaVal;
-      
       notices.push(`🖥️ "${key}" filled from multimodal asset analysis: ${mediaVal}`);
     }
   }
@@ -88,7 +87,7 @@ function calcConfidence(
 export async function estimateHandymanTask(
   taskId: string,
   userParams: TaskParams,
-  mediaItems: MediaInput[] = [] // Upgraded to support unlimited dynamic media layouts
+  mediaItems: MediaInput[] = []
 ): Promise<HandymanEstimateOutput> {
 
   // 1. Look up the task
@@ -128,11 +127,10 @@ export async function estimateHandymanTask(
 
   if (task.id === "other") {
     // 🧠 Pure Semantic Route: The AI provides the ENTIRE duration estimate
-    const totalAiMinutes = mediaResult?.additionalComplexityMinutes ?? 45; // Safe runtime fallback if empty
+    const totalAiMinutes = mediaResult?.additionalComplexityMinutes ?? 45;
     
     estimation = {
       estimatedDurationMinutes: totalAiMinutes,
-      // Build a standard professional variance corridor around the AI's pure time prediction
       rangeMinMinutes: Math.max(15, Math.round(totalAiMinutes * 0.8)),
       rangeMaxMinutes: Math.round(totalAiMinutes * 1.2),
       confidenceScore: confidenceScore,

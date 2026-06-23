@@ -53,18 +53,24 @@ export function needsConversion(mimeType: string): boolean {
 /**
  * Converts HEIC/HEIF bytes to JPEG using a pure JS parser first to bypass native
  * libheif reference limit guardrails, then uses sharp to compress the pixel array.
- * Returns the converted buffer and its new MIME type.
+ * Resizes images down cleanly to prevent bulky payload API network timeouts.
  */
 export async function convertHeicToJpeg(buffer: Buffer): Promise<{ buffer: Buffer; mimeType: "image/jpeg" }> {
   try {
     // Decode with pure JavaScript to completely ignore native cross-reference/security bounds
     const { width, height, data } = await heicDecode({ buffer });
 
-    // Package the raw unrolled frame into standard progressive JPEG format
+    // Package the raw unrolled frame, sizing to a healthy mid-ground resolution
     const converted = await sharp(data, {
       raw: { width, height, channels: 4 }
     })
-    .jpeg({ quality: 90 })
+    .resize({
+      width: 1600,              // High enough resolution to capture wall detailing
+      height: 1600,
+      fit: "inside",            // Retain original image proportions perfectly
+      withoutEnlargement: true  // Do not upscale small assets
+    })
+    .jpeg({ quality: 85, progressive: true }) // Production-ready balanced compression profile
     .toBuffer();
 
     return { buffer: converted, mimeType: "image/jpeg" };
