@@ -115,7 +115,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "wall_material",      minutes: wallMaterialAdder, notice: wallMaterialNote },
     { key: "shelf_length",       minutes: sizeAdder("shelfLengthInches", [[24,0],[48,5],[72,10],[999,15]]) },
     { key: "weight_capacity",    minutes: selectAdder("shelfWeightCapacity", { light_decor: 0, books_medium: 10, heavy_items: 20 }) },
-    { key: "no_studs",          minutes: (p) => p.studAccess === false ? 15 : 0 },
+    { key: "no_studs",           minutes: (p) => p.studAccess === false ? 15 : 0 },
     { key: "existing_hardware",  minutes: boolAdder("existingHardware", 10) },
     { key: "mount_height",       minutes: sizeAdder("mountHeight", [[72,0],[84,10],[999,20]]) },
   ],
@@ -580,9 +580,9 @@ export function estimateTaskTime(
     if (note) notices.push(note);
   }
 
-  // Image-detected complexity
+  // Media-detected complexity (Updated from image_detected_complexity)
   if (additionalComplexityMinutes > 0) {
-    breakdown["image_detected_complexity"] = additionalComplexityMinutes;
+    breakdown["media_detected_complexity"] = additionalComplexityMinutes;
   }
 
   const estimatedDurationMinutes = Object.values(breakdown).reduce((a, b) => a + b, 0);
@@ -590,7 +590,7 @@ export function estimateTaskTime(
 
   return {
     estimatedDurationMinutes: Math.max(5, estimatedDurationMinutes),
-    rangeMinMinutes: Math.max(5, Math.round(estimatedDurationMinutes * (1 - buffer / 2))),
+    rangeMinMinutes: Math.max(5, Math.round(estimatedDurationMinutes * (1 - buffer))),
     rangeMaxMinutes: Math.round(estimatedDurationMinutes * (1 + buffer)),
     confidenceScore,
     breakdown,

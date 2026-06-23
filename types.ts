@@ -2,6 +2,7 @@
  * types.ts
  *
  * Generalized type definitions for the multi-task handyman estimator.
+ * Updated to support both Image and Video multimodal analysis.
  */
 
 // ─── Task params ─────────────────────────────────────────────────────────────
@@ -13,32 +14,51 @@
  */
 export type TaskParams = Record<string, string | number | boolean | string[]>;
 
-// ─── Image analysis ──────────────────────────────────────────────────────────
+// ─── Multimodal Media Inputs ─────────────────────────────────────────────────
 
-export interface ImageAnalysisResult {
-  /** General observations relevant to the task — what the AI sees in the photo. */
+/**
+ * Represents any structured media item (Image or Video) formatted for the 
+ * Google Gen AI SDK inline data payload.
+ */
+export interface MediaInput {
+  inlineData: {
+    /** The Base64 encoded string of the asset file */
+    data: string;
+    /** The explicit file format type (e.g., "image/jpeg", "image/png", "video/mp4", "video/quicktime") */
+    mimeType: string;
+  };
+}
+
+// ─── Media analysis ──────────────────────────────────────────────────────────
+
+/**
+ * Renamed from ImageAnalysisResult to reflect comprehensive asset analysis
+ * (both pictures and sequential video streams).
+ */
+export interface MediaAnalysisResult {
+  /** General observations relevant to the task — what the AI sees in the photos or video frames. */
   observations: string[];
 
-  /** Confidence of the overall image analysis (0.0–1.0). */
+  /** Confidence of the overall visual/auditory asset analysis (0.0–1.0). */
   confidence: number;
 
   /**
-   * Parameter overrides inferred from the image.
+   * Parameter overrides inferred from the media.
    * Keys match TaskParams keys from the task definition.
-   * Only populated where the image gives clear evidence.
+   * Only populated where the assets give clear evidence.
    */
   parameterOverrides: TaskParams;
 
   /**
-   * Conflicts: cases where what the image shows differs from what the user stated.
+   * Conflicts: cases where what the media shows differs from what the user stated.
    * Each entry is a human-readable note for the installer.
    */
   validationFlags: string[];
 
   /**
-   * Additional time modifiers the AI detected from the image that aren't
+   * Additional time modifiers the AI detected from the media that aren't
    * covered by the standard param set (e.g. "wall has extensive water damage",
-   * "tight space with limited tool access").
+   * "tight space with limited tool access", "audible squeaking indicates subfloor friction").
    */
   additionalComplexityMinutes: number;
 
@@ -63,8 +83,12 @@ export interface EstimationResult {
   rangeMinMinutes: number;
   rangeMaxMinutes: number;
   confidenceScore: number;
-  breakdown: Record<string, number>;   // modifier label → minutes added
-  notices: string[];                   // human-readable warnings for the installer
+  /** modifier label → minutes added */
+  breakdown: Record<string, number> & {
+    base_time?: number;
+    media_detected_complexity?: number;
+  };
+  notices: string[];                    // human-readable warnings for the installer
 }
 
 // ─── Orchestrator output ─────────────────────────────────────────────────────
@@ -78,17 +102,22 @@ export interface HandymanEstimateOutput {
   rangeMaxMinutes: number;
   confidenceScore: number;
 
-  /** Final params after merging user input + image inference. */
+  /** Final params after merging user input + visual media inference. */
   reconciledParams: TaskParams;
 
   /** All notices: validation flags, installer notes, complexity warnings. */
   notices: string[];
 
   /** Minute-by-minute breakdown of what drove the estimate. */
-  breakdown: Record<string, number>;
+  breakdown: Record<string, number> & {
+    base_time?: number;
+    media_detected_complexity?: number;
+  };
 
-  /** What the image analysis specifically found (optional — only when images provided). */
-  imageInsights?: {
+  /** * What the media analysis specifically found 
+   * (optional — only when image or video assets are provided). 
+   */
+  mediaInsights?: {
     observations: string[];
     installerNotes: string[];
     additionalComplexityMinutes: number;

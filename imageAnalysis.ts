@@ -1,21 +1,21 @@
 /**
  * imageAnalysis.ts
  *
- * Analyzes one or more photos for any handyman task using Gemini Vision.
+ * Analyzes one or more photos or videos for any handyman task using Gemini Vision.
  * Returns observations, parameter inferences, validation flags,
- * and additional complexity detected from the images.
+ * and additional complexity detected from the visual/auditory media assets.
  *
  * Resilience additions:
- *   - Retry with exponential backoff on transient Gemini failures (429/5xx/timeout)
- *   - Hard timeout so a hung request doesn't block the estimate forever
- *   - Result caching so identical (photo + task + params) calls skip the API entirely
- *   - Defensive JSON parsing — a malformed Gemini response throws a typed error
- *     instead of crashing the process
+ * - Retry with exponential backoff on transient Gemini failures (429/5xx/timeout)
+ * - Hard timeout so a hung request doesn't block the estimate forever
+ * - Result caching so identical (media + task + params) calls skip the API entirely
+ * - Defensive JSON parsing — a malformed Gemini response throws a typed error
+ * instead of crashing the process
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { TaskDefinition, TaskParams } from "./taskRegistry";
-import { ImageAnalysisResult } from "./types";
+import { MediaAnalysisResult, MediaInput } from "./types";
 import { ImageAnalysisError, GeminiResponseParseError, withRetry, withTimeout } from "./errors";
 import { buildCacheKey, getCached, setCached } from "./cache";
 
@@ -37,23 +37,23 @@ const CACHE_TTL_SECONDS = Number(process.env.IMAGE_ANALYSIS_CACHE_TTL_SECONDS ??
 
 // ─── Gemini response schema ──────────────────────────────────────────────────
 
-const IMAGE_ANALYSIS_SCHEMA = {
+const MEDIA_ANALYSIS_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     observations: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "List of concrete visual observations relevant to the installation or repair task.",
+      description: "List of concrete visual or auditory observations relevant to the installation, repair, or setup task.",
     },
     confidence: {
       type: Type.NUMBER,
-      description: "Overall confidence from 0.0 to 1.0 in the image analysis.",
+      description: "Overall confidence from 0.0 to 1.0 in the media analysis.",
     },
     parameterOverrides: {
       type: Type.OBJECT,
       description:
         "Key-value pairs where keys match the task's parameter keys. " +
-        "Only include fields you can confidently infer from the image(s). " +
+        "Only include fields you can confidently infer from the media assets. " +
         "Values should match the expected type (string, number, or boolean).",
       additionalProperties: true,
     },
@@ -61,17 +61,17 @@ const IMAGE_ANALYSIS_SCHEMA = {
       type: Type.ARRAY,
       items: { type: Type.STRING },
       description:
-        "Conflicts between what the image shows and what the user provided. " +
+        "Conflicts between what the media shows/reveals and what the user provided. " +
         "Each item is a human-readable note like: " +
-        "'User said drywall but image shows brick wall.'",
+        "'User said drywall but media shows brick wall.'",
     },
     additionalComplexityMinutes: {
       type: Type.INTEGER,
       description:
-        "Extra minutes to add beyond the standard param-based estimate, " +
-        "due to issues visible in the photo that no parameter captures. " +
-        "E.g. cluttered work area (+10), water damage requiring treatment (+20). " +
-        "Use 0 if no additional complexity is detected.",
+        "CRITICAL BEHAVIOR RULE DEPENDING ON THE TASK ID:\n" +
+        "1. For standard tasks: Return extra minutes to add BEYOND the standard base estimate.\n" +
+        "2. For the 'other' task: There is NO base estimate. This field MUST represent the TOTAL estimated duration " +
+        "in minutes for a professional technician to complete the entire job from scratch based on the description and media content.",
     },
     installerNotes: {
       type: Type.ARRAY,
@@ -85,7 +85,7 @@ const IMAGE_ANALYSIS_SCHEMA = {
       nullable: true,
       description:
         "Only for 'other' tasks: your best description of what the task actually is " +
-        "(e.g. 'bathroom tile regrouting', 'exterior light fixture replacement').",
+        "(e.g. 'bathroom tile regrouting', 'exterior light fixture replacement', 'tree removal').",
     },
     inferredComplexity: {
       type: Type.STRING,
@@ -107,39 +107,60 @@ const IMAGE_ANALYSIS_SCHEMA = {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function stripBase64Prefix(base64: string): string {
-  const match = base64.match(/^data:[^;]+;base64,(.+)$/);
-  return match ? match[1] : base64;
+  if (!base64) return "";
+  
+  // If it contains a comma separator (e.g., "data:image/jpeg;base64,iVBOR..."), 
+  // grab everything after the comma.
+  if (base64.includes(",")) {
+    return base64.split(",")[1];
+  }
+  
+  // Otherwise, clean up any accidental whitespace/newlines and return
+  return base64.trim();
 }
 
 function buildPrompt(
   task: TaskDefinition,
   userParams: TaskParams,
-  imageCount: number
+  mediaCount: number
 ): string {
   const paramLines = Object.entries(userParams)
     .map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`)
     .join("\n");
 
-  return `You are an expert handyman estimator analyzing ${imageCount > 1 ? `${imageCount} photos` : "a photo"} of a job site.
+  // Determine standard vs custom instructions for the time estimation block
+  const durationInstruction = task.id === "other"
+    ? `CRITICAL TIME ESTIMATION RULE FOR 'OTHER' TASK:
+   Because this is an unclassified ('other') task, there is no system baseline time. 
+   You must populate the 'additionalComplexityMinutes' field with the TOTAL duration (in minutes) required 
+   for a professional handyman to complete the entire job from setup to cleanup. 
+   Do not provide a modifier; estimate the absolute total execution time (e.g., 120 for a 2-hour task).`
+    : `4. Set additionalComplexityMinutes for complications the standard parameters don't capture.
+   Examples: poor physical access, structural damage, surrounding hazards, heavy setup overhead, etc. 
+   This number will be added to a predefined baseline time.`;
+
+  return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) of a job site.
 
 TASK: ${task.label}
+TASK ID: ${task.id}
 TASK DESCRIPTION: ${task.imageHints}
 
 USER-PROVIDED PARAMETERS:
 ${paramLines || "  (none provided)"}
 
 INSTRUCTIONS:
-1. Analyze the image(s) carefully for details relevant to this specific task.
-2. Populate parameterOverrides ONLY for fields you can confidently infer from the image.
-   - For the "other" task, infer as much as possible (materials, scope, access, complexity).
+1. Analyze the image(s) and video frame(s) carefully for contextual details relevant to this specific task.
+2. Populate parameterOverrides ONLY for fields you can confidently infer from the provided media.
+   - For the "other" task, infer as much as possible (materials, scope, environment scope, access constraints, complexity).
    - Parameter keys must exactly match the task's parameter keys listed above.
-3. Note any conflicts between what the user stated and what the image shows in validationFlags.
-4. Set additionalComplexityMinutes for issues the standard parameters don't capture
-   (poor access, unexpected damage, hazardous conditions, site complexity, etc.).
-5. Write actionable installerNotes — things the technician should know before arrival.
-6. Set confidence between 0.0 (very unclear photo) and 1.0 (crystal clear, high certainty).
+3. Note any conflicts between what the user stated and what the media reveals in validationFlags.
 
-Return only valid JSON matching the schema. Be specific and honest — do not guess if the image is unclear.`;
+${durationInstruction}
+
+5. Write actionable installerNotes — adjustments the technician should expect before arriving.
+6. Set confidence between 0.0 (very blurry/unusable media) and 1.0 (crystal clear, high certainty context).
+
+Return only valid JSON matching the schema. Be specific, structured, and honest — do not guess blindly if the media asset is vague or unclear.`;
 }
 
 function safeParseGeminiJson(text: string): unknown {
@@ -153,7 +174,7 @@ function safeParseGeminiJson(text: string): unknown {
   }
 }
 
-function normalizeResult(parsed: any): ImageAnalysisResult {
+function normalizeResult(parsed: any): MediaAnalysisResult {
   return {
     observations: Array.isArray(parsed?.observations) ? parsed.observations : [],
     confidence: clamp(Number(parsed?.confidence ?? 0.5), 0, 1),
@@ -176,7 +197,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /** A safe fallback result used when Gemini fails after all retries are exhausted. */
-function degradedFallbackResult(reason: string): ImageAnalysisResult {
+function degradedFallbackResult(reason: string): MediaAnalysisResult {
   return {
     observations: [],
     confidence: 0,
@@ -184,30 +205,29 @@ function degradedFallbackResult(reason: string): ImageAnalysisResult {
     validationFlags: [],
     additionalComplexityMinutes: 0,
     installerNotes: [
-      `Photo analysis unavailable (${reason}). Estimate is based on submitted parameters only — confirm details on-site.`,
+      `Media analysis unavailable (${reason}). Estimate is based on submitted parameters only — confirm details on-site.`,
     ],
   };
 }
 
-// ─── Multi-image analysis ────────────────────────────────────────────────────
-
-export interface PhotoInput {
-  base64: string;
-  mediaType: "image/jpeg" | "image/png" | "image/webp";
-}
+// ─── Mixed Media analysis ───────────────────────────────────────────────────
 
 export interface AnalyzeOptions {
   /** If true, throws on Gemini failure instead of returning a degraded fallback result. */
   throwOnFailure?: boolean;
 }
 
-export async function analyzeJobPhotos(
-  photos: PhotoInput[],
+/**
+ * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and 
+ * processes them concurrently against the Gemini multimodal framework.
+ */
+export async function analyzeJobMedia(
+  mediaItems: MediaInput[],
   task: TaskDefinition,
   userParams: TaskParams = {},
   options: AnalyzeOptions = {}
-): Promise<ImageAnalysisResult> {
-  if (photos.length === 0) {
+): Promise<MediaAnalysisResult> {
+  if (mediaItems.length === 0) {
     return {
       observations: [],
       confidence: 0,
@@ -219,20 +239,20 @@ export async function analyzeJobPhotos(
   }
 
   // ── Cache check ──────────────────────────────────────────────────────────
-  const cacheKey = buildCacheKey(task.id, photos.map(p => p.base64), userParams);
+  const cacheKey = buildCacheKey(task.id, mediaItems.map(m => m.inlineData.data), userParams);
   const cached = getCached(cacheKey);
   if (cached) {
-    return cached;
+    return cached as MediaAnalysisResult;
   }
 
-  const prompt = buildPrompt(task, userParams, photos.length);
+  const prompt = buildPrompt(task, userParams, mediaItems.length);
 
   const contents: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [
     { text: prompt },
-    ...photos.map((photo) => ({
+    ...mediaItems.map((item) => ({
       inlineData: {
-        data: stripBase64Prefix(photo.base64),
-        mimeType: photo.mediaType,
+        data: stripBase64Prefix(item.inlineData.data),
+        mimeType: item.inlineData.mimeType,
       },
     })),
   ];
@@ -247,15 +267,15 @@ export async function analyzeJobPhotos(
             contents,
             config: {
               responseMimeType: "application/json",
-              responseJsonSchema: IMAGE_ANALYSIS_SCHEMA,
-              temperature: 0.2,
+              responseJsonSchema: MEDIA_ANALYSIS_SCHEMA,
+              temperature: 0.0,
+              seed : 42, 
             },
           }),
           GEMINI_TIMEOUT_MS
         );
 
         if (!response.text) {
-          // Empty response is often transient (safety filter, truncation) — treat as retryable
           throw new ImageAnalysisError("Gemini returned an empty response", { retryable: true });
         }
 
@@ -267,7 +287,7 @@ export async function analyzeJobPhotos(
         baseDelayMs: GEMINI_RETRY_BASE_DELAY_MS,
         onRetry: (attempt, error) => {
           console.warn(
-            `[imageAnalysis] Retry ${attempt}/${GEMINI_MAX_RETRIES} for task "${task.id}" after error:`,
+            `[mediaAnalysis] Retry ${attempt}/${GEMINI_MAX_RETRIES} for task "${task.id}" after error:`,
             error instanceof Error ? error.message : error
           );
         },
@@ -278,20 +298,18 @@ export async function analyzeJobPhotos(
     return result;
 
   } catch (error) {
-    console.error(`[imageAnalysis] Failed for task "${task.id}" after retries:`, error);
+    console.error(`[mediaAnalysis] Failed for task "${task.id}" after retries:`, error);
 
     if (options.throwOnFailure) {
       if (error instanceof ImageAnalysisError || error instanceof GeminiResponseParseError) {
         throw error;
       }
       throw new ImageAnalysisError(
-        `Image analysis failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Media analysis failed: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error, retryable: false }
       );
     }
 
-    // Default behavior: degrade gracefully so a Gemini outage doesn't break
-    // the whole estimate — the user still gets a time estimate from params alone.
     const reason = error instanceof Error ? error.message : "unknown error";
     return degradedFallbackResult(reason);
   }
