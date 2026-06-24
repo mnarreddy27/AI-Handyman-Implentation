@@ -187,6 +187,15 @@ async function runTests() {
     console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
   }
 
+  try {
+    console.log("── Test 3: TV Installation: (Single Image Base Case) ──");
+    const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1463.MOV"]);
+    const result = await estimateHandymanTask("tv_installation", {}, media);
+    printResult(result);
+  } catch (err) {
+    console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
+  }
+
   // ── Test 2: HEIC image (auto-converted to JPEG) ───────────────────────────
   // try {
   //   console.log("\n── Test 2: HEIC Conversion Check (iPhone Photo) ──────────");
