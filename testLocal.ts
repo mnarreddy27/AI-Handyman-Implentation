@@ -171,7 +171,7 @@ async function runTests() {
   // ── Test 1: Single Image Assessment ───────────────────────────────────────
   try {
     console.log("── Test 1: TV Installation: (Single Image Base Case) ──");
-    const media = await loadMediaSuite(["IMG_1463.MOV",]);
+    const media = await loadMediaSuite(["IMG_1468.HEIC",]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
   } catch (err) {
@@ -179,7 +179,7 @@ async function runTests() {
   }
 
   try {
-    console.log("── Test 2: TV Installation: (Single Image Base Case) ──");
+    console.log("── Test 2: TV Installation: (Two Images) ──");
     const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1469.HEIC"]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
@@ -188,7 +188,7 @@ async function runTests() {
   }
 
   try {
-    console.log("── Test 3: TV Installation: (Single Image Base Case) ──");
+    console.log("── Test 3: TV Installation: (Image, Video) ──");
     const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1463.MOV"]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
