@@ -4,7 +4,7 @@
  * Orchestrates the full estimation pipeline for any handyman task:
  * 1. Validate the task ID against the registry
  * 2. Analyze job site media files (unlimited pictures, videos, or mixed)
- * 3. Reconcile user params + media inferences (media overrides on conflict)
+ * 3. Reconcile user context and media observations
  * 4. Run the estimation engine (or handle dynamic pure-AI estimation for 'other')
  * 5. Return the unified output
  */
@@ -16,70 +16,12 @@ import { HandymanEstimateOutput, MediaAnalysisResult, MediaInput, TaskParams } f
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function isBlank(value: unknown): boolean {
-  return value === undefined || value === null || value === "";
-}
-
-function valuesConflict(a: unknown, b: unknown): boolean {
-  return String(a) !== String(b);
-}
-
 /**
- * Merge user-supplied params with media inferences.
- * Rules:
- * - Media insights win on conflict (more reliable for real-world visual parameters).
- * - Media analysis fills in missing user params silently.
- * - Conflicts are surfaced as warnings in the notices suite.
+ * Calculate overall confidence score based directly on media asset analysis.
  */
-function reconcileParams(
-  userParams: TaskParams,
-  mediaResult: MediaAnalysisResult | null,
-  taskParamKeys: string[]
-): { reconciled: TaskParams; notices: string[] } {
-  const notices: string[] = [];
-  const mediaOverrides = mediaResult?.parameterOverrides ?? {};
-  const reconciled: TaskParams = { ...userParams };
-
-  for (const key of taskParamKeys) {
-    const userVal = userParams[key];
-    const mediaVal = mediaOverrides[key];
-
-    if (!isBlank(userVal) && !isBlank(mediaVal) && valuesConflict(userVal, mediaVal)) {
-      notices.push(
-        `⚠️ Mismatch on "${key}": user said "${userVal}" but media indicates "${mediaVal}" — using verified media value.`
-      );
-      reconciled[key] = mediaVal;
-      continue;
-    }
-
-    if (!isBlank(userVal)) {
-      reconciled[key] = userVal;
-      continue;
-    }
-
-    if (!isBlank(mediaVal)) {
-      reconciled[key] = mediaVal;
-      notices.push(`🖥️ "${key}" filled from multimodal asset analysis: ${mediaVal}`);
-    }
-  }
-
-  return { reconciled, notices };
-}
-
-/**
- * Calculate overall confidence score.
- * Starts at the visual/media asset confidence, then penalizes for missing user params.
- */
-function calcConfidence(
-  userParams: TaskParams,
-  mediaResult: MediaAnalysisResult | null,
-  taskParamKeys: string[]
-): number {
+function calcConfidence(mediaResult: MediaAnalysisResult | null): number {
   const mediaConfidence = mediaResult?.confidence ?? 0.55;
-  const requiredKeys = taskParamKeys.filter(k => !k.startsWith("optional"));
-  const missingCount = requiredKeys.filter(k => isBlank(userParams[k])).length;
-  const completenessBoost = Math.max(0, 1 - missingCount * 0.08);
-  return Math.min(1, Math.max(0.35, mediaConfidence * completenessBoost));
+  return Math.min(1, Math.max(0.35, mediaConfidence));
 }
 
 // ─── Main orchestrator ────────────────────────────────────────────────────────
@@ -96,8 +38,6 @@ export async function estimateHandymanTask(
     throw new Error(`Unknown task ID: "${taskId}". Check taskRegistry.ts for valid IDs.`);
   }
 
-  const taskParamKeys = task.params.map(p => p.key);
-
   // 2. Analyze media assets (supports 0 to N images/videos concurrently)
   let mediaResult: MediaAnalysisResult | null = null;
 
@@ -105,24 +45,16 @@ export async function estimateHandymanTask(
     mediaResult = await analyzeJobMedia(mediaItems, task, userParams);
   }
 
-  // 3. Reconcile params
-  const { reconciled, notices: reconcileNotices } = reconcileParams(
-    userParams,
-    mediaResult,
-    taskParamKeys
-  );
-
-  // 4. Collect all notices
+  // 3. Collect all descriptive notices
   const allNotices: string[] = [
-    ...reconcileNotices,
     ...(mediaResult?.validationFlags ?? []),
     ...(mediaResult?.installerNotes ?? []),
   ];
 
-  // 5. Confidence score
-  const confidenceScore = calcConfidence(userParams, mediaResult, taskParamKeys);
+  // 4. Determine confidence score
+  const confidenceScore = calcConfidence(mediaResult);
 
-  // ─── 6. Run Estimation ─────────────────────────────────────────────────────
+  // ─── 5. Run Estimation ─────────────────────────────────────────────────────
   let estimation;
 
   if (task.id === "other") {
@@ -144,16 +76,16 @@ export async function estimateHandymanTask(
     estimation = estimateTaskTime(
       task.id,
       task.baseMinutes,
-      reconciled,
+      userParams,
       confidenceScore,
       mediaResult?.additionalComplexityMinutes ?? 0
     );
   }
 
-  // Merge estimation notices
+  // Merge estimation engine tracking notices
   allNotices.push(...estimation.notices);
 
-  // 7. Build output matching HandymanEstimateOutput layout contracts
+  // 6. Build unified output matching workspace layout contracts
   return {
     taskId: task.id,
     taskLabel: task.label,
@@ -163,7 +95,7 @@ export async function estimateHandymanTask(
     rangeMaxMinutes: estimation.rangeMaxMinutes,
     confidenceScore: estimation.confidenceScore,
 
-    reconciledParams: reconciled,
+    reconciledParams: userParams,
     notices: [...new Set(allNotices)], // deduplicate
 
     breakdown: estimation.breakdown,

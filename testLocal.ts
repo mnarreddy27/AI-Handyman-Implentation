@@ -6,13 +6,13 @@
  * Run with: npx ts-node src/testLocal.ts
  *
  * Includes:
- *   - Correct MIME mapping for HEIC/HEIF images and MOV videos (previously
- *     fell through to wrong fallback types)
- *   - Automatic conversion of HEIC -> JPEG and MOV -> MP4 before anything
- *     gets base64-encoded or sent to Gemini, since Gemini doesn't reliably
- *     support either source format
- *   - Magic-byte validation for non-converted formats, so a corrupted or
- *     mislabeled file fails with a clear message instead of a Gemini 400
+ * - Correct MIME mapping for HEIC/HEIF images and MOV videos (previously
+ * fell through to wrong fallback types)
+ * - Automatic conversion of HEIC -> JPEG and MOV -> MP4 before anything
+ * gets base64-encoded or sent to Gemini, since Gemini doesn't reliably
+ * support either source format
+ * - Magic-byte validation for non-converted formats, so a corrupted or
+ * mislabeled file fails with a clear message instead of a Gemini 400
  */
 
 import { estimateHandymanTask } from "./orchestration";
@@ -51,7 +51,7 @@ async function loadMediaAsset(inputPath: string): Promise<MediaInput> {
   let rawBuffer: Buffer;
 
   if (inputPath.startsWith("http://") || inputPath.startsWith("https://")) {
-    console.log(`  🔗 Fetching asset from URL: ${inputPath.slice(0, 60)}...`);
+    console.log(` 🔗 Fetching asset from URL: ${inputPath.slice(0, 60)}...`);
     const response = await fetch(inputPath);
     if (!response.ok) throw new Error(`HTTP ${response.status} fetching media file`);
     rawBuffer = Buffer.from(await response.arrayBuffer());
@@ -70,15 +70,14 @@ async function loadMediaAsset(inputPath: string): Promise<MediaInput> {
       );
     }
 
-    console.log(`  📁 Loading local file asset: ${fullPath}`);
+    console.log(` 📁 Loading local file asset: ${fullPath}`);
     rawBuffer = fs.readFileSync(fullPath);
   }
 
   const ext = inputPath.split(".").pop()?.toLowerCase();
   const claimedMimeType = mimeTypeForExtension(ext);
 
-  // Sanity-check the raw bytes before we even consider conversion —
-  // catches truncated downloads / wrong-extension files early.
+  // Sanity-check the raw bytes before we even consider conversion
   validateMagicBytes(inputPath, claimedMimeType, rawBuffer);
 
   // ── Convert HEIC -> JPEG and MOV -> MP4 if needed ─────────────────────────
@@ -86,11 +85,11 @@ async function loadMediaAsset(inputPath: string): Promise<MediaInput> {
   let finalMimeType = claimedMimeType;
 
   if (needsConversion(claimedMimeType)) {
-    console.log(`  🔄 Converting ${claimedMimeType} -> Gemini-compatible format...`);
+    console.log(` 🔄 Converting ${claimedMimeType} -> Gemini-compatible format...`);
     const result = await normalizeMediaForGemini(rawBuffer, claimedMimeType);
     finalBuffer = result.buffer;
     finalMimeType = result.mimeType;
-    console.log(`  ✅ Converted to ${finalMimeType} (${(finalBuffer.length / 1024).toFixed(0)}KB)`);
+    console.log(` ✅ Converted to ${finalMimeType} (${(finalBuffer.length / 1024).toFixed(0)}KB)`);
   }
 
   return {
@@ -103,9 +102,6 @@ async function loadMediaAsset(inputPath: string): Promise<MediaInput> {
 
 /**
  * Checks the first few bytes against known file signatures ("magic numbers").
- * Operates on raw bytes BEFORE base64 encoding and before conversion, so it
- * validates what's actually on disk, not a guess based on the file extension.
- * Skips formats without a simple fixed-offset signature (HEIC, video containers).
  */
 function validateMagicBytes(filename: string, mimeType: string, buffer: Buffer): void {
   const signatures: Record<string, number[]> = {
@@ -115,7 +111,7 @@ function validateMagicBytes(filename: string, mimeType: string, buffer: Buffer):
   };
 
   const expected = signatures[mimeType];
-  if (!expected) return; // HEIC/video signatures aren't simple fixed-offset checks — skip
+  if (!expected) return; // HEIC/video signatures skip fixed-offset checks
 
   const matches = expected.every((byte, i) => buffer[i] === byte);
 
@@ -124,8 +120,7 @@ function validateMagicBytes(filename: string, mimeType: string, buffer: Buffer):
       `"${filename}" does not look like a valid ${mimeType} file.\n` +
       `  Expected byte signature: [${expected.map(b => b.toString(16)).join(" ")}]\n` +
       `  Got: [${Array.from(buffer.slice(0, expected.length)).map(b => b.toString(16)).join(" ")}]\n` +
-      `  This usually means the file is corrupted, truncated, or mislabeled — ` +
-      `check the file on disk before sending it to Gemini.`
+      `  This usually means the file is corrupted, truncated, or mislabeled.`
     );
   }
 }
@@ -137,20 +132,20 @@ async function loadMediaSuite(paths: string[]): Promise<MediaInput[]> {
 // ─── Test Visualizer Output ──────────────────────────────────────────────────
 
 function printResult(result: Awaited<ReturnType<typeof estimateHandymanTask>>) {
-  console.log(`\n  ✅ Task:          ${result.taskLabel} (${result.taskId})`);
-  console.log(`  ⏱️  Estimate:       ${result.estimatedDurationMinutes} min`);
-  console.log(`  📊 Range:          ${result.rangeMinMinutes}–${result.rangeMaxMinutes} min`);
-  console.log(`  🎯 Confidence:     ${(result.confidenceScore * 100).toFixed(0)}%`);
-  console.log(`  🔢 Breakdown:`, result.breakdown);
+  console.log(`\n ✅ Task:          ${result.taskLabel} (${result.taskId})`);
+  console.log(` ⏱️  Estimate:       ${result.estimatedDurationMinutes} min`);
+  console.log(` 📊 Range:          ${result.rangeMinMinutes}–${result.rangeMaxMinutes} min`);
+  console.log(` 🎯 Confidence:     ${(result.confidenceScore * 100).toFixed(0)}%`);
+  console.log(` 🔢 Breakdown:`, result.breakdown);
 
   if (result.notices.length > 0) {
-    console.log(`  📋 Notices & Flags:`);
+    console.log(` 📋 Notices & Flags:`);
     result.notices.forEach(n => console.log(`     • ${n}`));
   }
 
   if (result.mediaInsights) {
-    console.log(`  🖥️  Multimodal Media Insights:`);
-    console.log(`     • Extra Modifier: +${result.mediaInsights.additionalComplexityMinutes} min added`);
+    console.log(` 🖥️  Multimodal Media Insights:`);
+    console.log(`     • Complexity Minutes: ${result.mediaInsights.additionalComplexityMinutes} min`);
     result.mediaInsights.observations.forEach(o => console.log(`     👁  Observation: ${o}`));
     result.mediaInsights.installerNotes.forEach(note => console.log(`     📝 Note: ${note}`));
 
@@ -158,7 +153,7 @@ function printResult(result: Awaited<ReturnType<typeof estimateHandymanTask>>) {
       console.log(`     🔍 Inferred Target Type: ${result.mediaInsights.inferredTaskType}`);
     }
   }
-  console.log("  ─────────────────────────────────────────────");
+  console.log(" ─────────────────────────────────────────────");
 }
 
 // ─── Test Suite Executions ───────────────────────────────────────────────────
@@ -171,60 +166,32 @@ async function runTests() {
   // ── Test 1: Single Image Assessment ───────────────────────────────────────
   try {
     console.log("── Test 1: TV Installation: (Single Image Base Case) ──");
-    const media = await loadMediaSuite(["IMG_1468.HEIC",]);
+    const media = await loadMediaSuite(["TvOnBrick.webp"]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
   } catch (err) {
     console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
   }
 
+  // ── Test 2: Two Images Assessment ─────────────────────────────────────────
   try {
     console.log("── Test 2: TV Installation: (Two Images) ──");
     const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1469.HEIC"]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
   } catch (err) {
-    console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
+    console.error("  ❌ Test 2 Encountered Error:", err instanceof Error ? err.message : err);
   }
 
+  // ── Test 3: Mixed Media (Image + Video) ───────────────────────────────────
   try {
     console.log("── Test 3: TV Installation: (Image, Video) ──");
     const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1463.MOV"]);
     const result = await estimateHandymanTask("tv_installation", {}, media);
     printResult(result);
   } catch (err) {
-    console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
+    console.error("  ❌ Test 3 Encountered Error:", err instanceof Error ? err.message : err);
   }
-
-  // ── Test 2: HEIC image (auto-converted to JPEG) ───────────────────────────
-  // try {
-  //   console.log("\n── Test 2: HEIC Conversion Check (iPhone Photo) ──────────");
-  //   const media = await loadMediaSuite(["iphone_photo.heic"]);
-  //   const result = await estimateHandymanTask("other", { notes: "general iphone photo test" }, media);
-  //   printResult(result);
-  // } catch (err) {
-  //   console.error("  ❌ Test 2 Encountered Error:", err instanceof Error ? err.message : err);
-  // }
-
-  // // ── Test 3: MOV video (auto-converted to MP4) ──────────────────────────────
-  // try {
-  //   console.log("\n── Test 3: MOV Conversion Check (iPhone Video) ───────────");
-  //   const media = await loadMediaSuite(["iphone_video.mov"]);
-  //   const result = await estimateHandymanTask("other", { notes: "general iphone video test" }, media);
-  //   printResult(result);
-  // } catch (err) {
-  //   console.error("  ❌ Test 3 Encountered Error:", err instanceof Error ? err.message : err);
-  // }
-
-  // // ── Test 4: Mixed media — JPEG + HEIC + MOV together ──────────────────────
-  // try {
-  //   console.log("\n── Test 4: Mixed Format Batch (JPEG + HEIC + MOV) ────────");
-  //   const media = await loadMediaSuite(["ToiletOne.jpeg", "iphone_photo.heic", "iphone_video.mov"]);
-  //   const result = await estimateHandymanTask("other", { notes: "mixed format batch test" }, media);
-  //   printResult(result);
-  // } catch (err) {
-  //   console.error("  ❌ Test 4 Encountered Error:", err instanceof Error ? err.message : err);
-  // }
 
   console.log("\n✅ Assessment runs finished.");
 }

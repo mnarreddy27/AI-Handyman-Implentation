@@ -8,8 +8,7 @@
  * No external API calls — this is deterministic arithmetic only.
  */
 
-import { TaskParams } from "./taskRegistry";
-import { EstimationResult } from "./types";
+import { EstimationResult, TaskParams } from "./types";
 
 // ─── Modifier types ──────────────────────────────────────────────────────────
 
@@ -83,20 +82,20 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   tv_installation: [
     { key: "wall_material",      minutes: wallMaterialAdder, notice: wallMaterialNote },
     { key: "tv_diagonal_size",   minutes: sizeAdder("tvDiagonal", [[43,0],[55,5],[65,15],[75,25],[999,40]]),
-                                  notice: (p) => Number(p.tvDiagonal) >= 75 ? "Large TV — second person likely required" : null },
+                                 notice: (p) => Number(p.tvDiagonal) >= 75 ? "Large TV — second person likely required" : null },
     { key: "tv_weight",          minutes: sizeAdder("tvWeightLbs", [[30,0],[60,10],[100,20],[999,35]]),
-                                  notice: (p) => Number(p.tvWeightLbs) > 80 ? "Heavy TV — confirm two-person crew" : null },
+                                 notice: (p) => Number(p.tvWeightLbs) > 80 ? "Heavy TV — confirm two-person crew" : null },
     { key: "mount_type",         minutes: selectAdder("mountType", { fixed: 0, tilting: 10, full_motion: 25 }) },
     { key: "above_fireplace",    minutes: boolAdder("aboveFireplace", 30),
-                                  notice: (p) => p.aboveFireplace ? "Above-fireplace mount requires careful heat clearance and routing" : null },
+                                 notice: (p) => p.aboveFireplace ? "Above-fireplace mount requires careful heat clearance and routing" : null },
     { key: "mount_height",       minutes: sizeAdder("mountHeight", [[72,0],[84,10],[999,20]]),
-                                  notice: (p) => Number(p.mountHeight) > 72 ? "High mount — ladder adds complexity" : null },
+                                 notice: (p) => Number(p.mountHeight) > 72 ? "High mount — ladder adds complexity" : null },
     { key: "wire_concealment",   minutes: selectAdder("wireConcealment", { none: 0, external_track: 10, in_wall: 35 }),
-                                  notice: (p) => p.wireConcealment === "in_wall" ? "In-wall routing may require permit review" : null },
+                                 notice: (p) => p.wireConcealment === "in_wall" ? "In-wall routing may require permit review" : null },
     { key: "outlet_position",    minutes: selectAdder("outletPosition", { behind_tv_area: 0, nearby: 8, far: 20, unknown: 5 }),
-                                  notice: (p) => p.outletPosition === "far" ? "Outlet far from TV — extension or new outlet may be needed" : null },
+                                 notice: (p) => p.outletPosition === "far" ? "Outlet far from TV — extension or new outlet may be needed" : null },
     { key: "stud_access",        minutes: (p) => p.studAccess === false ? 20 : 0,
-                                  notice: (p) => p.studAccess === false ? "No studs confirmed — toggle anchors add time" : null },
+                                 notice: (p) => p.studAccess === false ? "No studs confirmed — toggle anchors add time" : null },
   ],
 
   // ── TV cord concealment ────────────────────────────────────────────────
@@ -144,12 +143,12 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
 
   ceiling_fan_swap: [
     { key: "ceiling_height",     minutes: sizeAdder("ceilingHeightFt", [[8,0],[10,15],[999,25]]),
-                                  notice: (p) => Number(p.ceilingHeightFt) > 9 ? "High ceiling — scaffolding or tall ladder required" : null },
+                                 notice: (p) => Number(p.ceilingHeightFt) > 9 ? "High ceiling — scaffolding or tall ladder required" : null },
     { key: "fan_diameter",       minutes: sizeAdder("fanBladeDiameterInches", [[42,0],[52,5],[60,10],[999,15]]) },
     { key: "replacing_existing", minutes: boolAdder("replacingExisting", 15) },
     { key: "has_remote",         minutes: boolAdder("hasRemote", 10) },
     { key: "box_type",           minutes: selectAdder("existingBoxType", { fan_rated: 0, standard_light: 20, unknown: 10 }),
-                                  notice: (p) => p.existingBoxType === "standard_light" ? "Junction box may need upgrade to fan-rated brace" : null },
+                                 notice: (p) => p.existingBoxType === "standard_light" ? "Junction box may need upgrade to fan-rated brace" : null },
   ],
 
   // ── Smart home device ──────────────────────────────────────────────────
@@ -157,9 +156,9 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   smart_home_device: [
     { key: "device_type",        minutes: selectAdder("deviceType", { smart_thermostat: 0, video_doorbell: 10, smart_lock: 15, smart_switch: 5, security_camera: 20, other: 10 }) },
     { key: "replacing_existing", minutes: (p) => p.replacingExisting === false ? 20 : 0,
-                                  notice: (p) => p.replacingExisting === false ? "New installation (no existing device) — wiring run may be needed" : null },
+                                 notice: (p) => p.replacingExisting === false ? "New installation (no existing device) — wiring run may be needed" : null },
     { key: "wiring_available",   minutes: (p) => p.wiringAvailable === false ? 30 : 0,
-                                  notice: (p) => p.wiringAvailable === false ? "No existing wiring — may require electrician for power run" : null },
+                                 notice: (p) => p.wiringAvailable === false ? "No existing wiring — may require electrician for power run" : null },
     { key: "wall_material",      minutes: wallMaterialAdder, notice: wallMaterialNote },
   ],
 
@@ -168,7 +167,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   smoke_co_detector: [
     { key: "unit_count",         minutes: countAdder("unitCount", 12) },
     { key: "power_type",         minutes: selectAdder("powerType", { battery: 0, hardwired: 20, hardwired_with_battery_backup: 25 }),
-                                  notice: (p) => p.powerType !== "battery" ? "Hardwired install — power must be cut during installation" : null },
+                                 notice: (p) => p.powerType !== "battery" ? "Hardwired install — power must be cut during installation" : null },
     { key: "replacing_existing", minutes: boolAdder("replacingExisting", 5) },
     { key: "ceiling_mount",      minutes: (p) => p.ceilingMount === false ? 5 : 0 },
   ],
@@ -197,7 +196,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "location",           minutes: selectAdder("location", { shower: 10, toilet: 5, bathtub: 10, hallway: 0, stairs: 15 }) },
     { key: "wall_material",      minutes: wallMaterialAdder, notice: wallMaterialNote },
     { key: "no_studs",           minutes: (p) => p.studAccess === false ? 20 : 0,
-                                  notice: (p) => p.studAccess === false ? "No studs — toggle bolts or blocking required for safety-rated load" : null },
+                                 notice: (p) => p.studAccess === false ? "No studs — toggle bolts or blocking required for safety-rated load" : null },
   ],
 
   // ── Furniture assembly ─────────────────────────────────────────────────
@@ -207,9 +206,9 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "item_count",         minutes: countAdder("itemCount", 35) },
     { key: "box_count",          minutes: countAdder("boxCount", 5) },
     { key: "no_instructions",    minutes: (p) => p.hasInstructions === false ? 20 : 0,
-                                  notice: (p) => p.hasInstructions === false ? "No instructions — assembly will take longer" : null },
+                                 notice: (p) => p.hasInstructions === false ? "No instructions — assembly will take longer" : null },
     { key: "room_access",        minutes: (p) => p.roomIsAccessible === false ? 20 : 0,
-                                  notice: (p) => p.roomIsAccessible === false ? "Tight access — navigating stairs/hallways adds time" : null },
+                                 notice: (p) => p.roomIsAccessible === false ? "Tight access — navigating stairs/hallways adds time" : null },
   ],
 
   // ── Outdoor furniture ──────────────────────────────────────────────────
@@ -219,7 +218,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "furniture_type",     minutes: selectAdder("furnitureType", { table: 10, chair_set: 15, lounger: 5, swing: 25, umbrella_base: 5, other: 5 }) },
     { key: "item_count",         minutes: countAdder("itemCount", 20) },
     { key: "has_rust",           minutes: boolAdder("hasRust", 20),
-                                  notice: (p) => p.hasRust ? "Rust present — penetrating oil and extra time needed" : null },
+                                 notice: (p) => p.hasRust ? "Rust present — penetrating oil and extra time needed" : null },
   ],
 
   // ── Mailbox ────────────────────────────────────────────────────────────
@@ -228,7 +227,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "mount_type",         minutes: selectAdder("mountType", { post_mount: 15, wall_mount: 5 }) },
     { key: "replacing_existing", minutes: boolAdder("replacingExisting", 10) },
     { key: "post_condition",     minutes: selectAdder("postCondition", { good: 0, needs_replacement: 20, no_post: 25, not_applicable: 0 }),
-                                  notice: (p) => p.postCondition === "needs_replacement" ? "Post replacement adds significant time and concrete setting time" : null },
+                                 notice: (p) => p.postCondition === "needs_replacement" ? "Post replacement adds significant time and concrete setting time" : null },
     { key: "ground_type",        minutes: selectAdder("groundType", { soil: 0, concrete: 15, asphalt: 15, unknown: 5 }) },
   ],
 
@@ -254,7 +253,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "surface_type",       minutes: selectAdder("surfaceType", { deck: 0, fence: 0, both: 20 }) },
     { key: "area_sq_ft",         minutes: sizeAdder("areaSqFt", [[50,0],[100,15],[200,30],[999,60]]) },
     { key: "existing_condition", minutes: selectAdder("existingCondition", { good_clean: 0, needs_light_prep: 20, peeling_heavy_prep: 45 }),
-                                  notice: (p) => p.existingCondition === "peeling_heavy_prep" ? "Heavy prep (stripping/sanding) required before staining" : null },
+                                 notice: (p) => p.existingCondition === "peeling_heavy_prep" ? "Heavy prep (stripping/sanding) required before staining" : null },
     { key: "coat_count",         minutes: (p) => (Number(p.coatCount ?? 1) - 1) * 30 },
   ],
 
@@ -315,7 +314,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "item_count",         minutes: countAdder("itemCount", 3) },
     { key: "hardware_type",      minutes: selectAdder("hardwareType", { knobs: 0, pulls: 0, hinges: 5, mixed: 3 }) },
     { key: "hole_fit",           minutes: (p) => p.existingHoleFits === false ? (Number(p.itemCount ?? 4) * 5) : 0,
-                                  notice: (p) => p.existingHoleFits === false ? "New holes needed — drilling adds significant time" : null },
+                                 notice: (p) => p.existingHoleFits === false ? "New holes needed — drilling adds significant time" : null },
   ],
 
   // ── Door weather stripping ─────────────────────────────────────────────
@@ -378,7 +377,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   showerhead_replacement: [
     { key: "type",               minutes: selectAdder("showerheadType", { standard_fixed: 0, handheld: 5, rain_head: 10, combo: 15 }) },
     { key: "pipe_arm",           minutes: selectAdder("pipeArmCondition", { good: 0, corroded_may_need_replacement: 20 }),
-                                  notice: (p) => p.pipeArmCondition === "corroded_may_need_replacement" ? "Pipe arm may need replacement — corrosion adds risk of leak" : null },
+                                 notice: (p) => p.pipeArmCondition === "corroded_may_need_replacement" ? "Pipe arm may need replacement — corrosion adds risk of leak" : null },
   ],
 
   // ── Toilet seat ────────────────────────────────────────────────────────
@@ -407,7 +406,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   sink_drain_trap: [
     { key: "sink_type",          minutes: selectAdder("sinkType", { bathroom_single: 0, bathroom_double: 10, kitchen_single: 5, kitchen_double: 15 }) },
     { key: "trap_material",      minutes: selectAdder("trapMaterial", { pvc_plastic: 0, chrome_metal: 10, unknown: 5 }),
-                                  notice: (p) => p.trapMaterial === "chrome_metal" ? "Metal traps can be stubborn — penetrating oil may be needed" : null },
+                                 notice: (p) => p.trapMaterial === "chrome_metal" ? "Metal traps can be stubborn — penetrating oil may be needed" : null },
     { key: "access_difficulty",  minutes: selectAdder("accessDifficulty", { open_accessible: 0, full_cabinet: 5, very_tight: 15 }) },
   ],
 
@@ -452,7 +451,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "area_count",         minutes: countAdder("areaCount", 5) },
     { key: "damage_size",        minutes: selectAdder("damageSize", { small_scuffs: 0, medium_patches: 10, large_sections: 20 }) },
     { key: "matching_paint",     minutes: (p) => p.matchingPaintAvailable === false ? 15 : 0,
-                                  notice: (p) => p.matchingPaintAvailable === false ? "No matching paint on hand — color matching adds time" : null },
+                                 notice: (p) => p.matchingPaintAvailable === false ? "No matching paint on hand — color matching adds time" : null },
   ],
 
   // ── Drywall patching ───────────────────────────────────────────────────
@@ -474,7 +473,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
       }
     },
     { key: "existing_condition", minutes: selectAdder("existingCondition", { clean_removal: 0, moldy_needs_treatment: 20, partial_missing: 5 }),
-                                  notice: (p) => p.existingCondition === "moldy_needs_treatment" ? "Mold treatment required before recaulking — adds significant time" : null },
+                                 notice: (p) => p.existingCondition === "moldy_needs_treatment" ? "Mold treatment required before recaulking — adds significant time" : null },
   ],
 
   // ── Grout touch-up ─────────────────────────────────────────────────────
@@ -505,7 +504,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
     { key: "squeak_count",       minutes: countAdder("squeakCount", 8) },
     { key: "floor_type",         minutes: selectAdder("floorType", { hardwood: 0, carpet: 15, lvp_laminate: 10, other: 10 }) },
     { key: "basement_access",    minutes: (p) => p.basementAccess === true ? -10 : 0,
-                                  notice: (p) => p.basementAccess === true ? "Sub-floor access speeds up screw placement" : null },
+                                 notice: (p) => p.basementAccess === true ? "Sub-floor access speeds up screw placement" : null },
   ],
 
   // ── Tile re-grouting ───────────────────────────────────────────────────
@@ -521,7 +520,7 @@ const TASK_MODIFIERS: Record<string, Modifier[]> = {
   deck_board_tightening: [
     { key: "deck_area",          minutes: sizeAdder("deckAreaSqFt", [[50,0],[100,15],[200,30],[999,50]]) },
     { key: "board_condition",    minutes: selectAdder("boardCondition", { good_just_loose: 0, warped_some_boards: 20, rot_present: 0 }),
-                                  notice: (p) => p.boardCondition === "rot_present" ? "Rot detected — board replacement may be needed (out of scope for tightening)" : null },
+                                 notice: (p) => p.boardCondition === "rot_present" ? "Rot detected — board replacement may be needed (out of scope for tightening)" : null },
   ],
 
   // ── Cabinet repair ─────────────────────────────────────────────────────
@@ -580,7 +579,7 @@ export function estimateTaskTime(
     if (note) notices.push(note);
   }
 
-  // Media-detected complexity (Updated from image_detected_complexity)
+  // Media-detected complexity
   if (additionalComplexityMinutes > 0) {
     breakdown["media_detected_complexity"] = additionalComplexityMinutes;
   }
@@ -592,7 +591,7 @@ export function estimateTaskTime(
     estimatedDurationMinutes: Math.max(5, estimatedDurationMinutes),
     rangeMinMinutes: Math.max(5, Math.round(estimatedDurationMinutes * (1 - buffer))),
     rangeMaxMinutes: Math.round(estimatedDurationMinutes * (1 + buffer)),
-    confidenceScore,
+    confidenceScore: confidenceScore,
     breakdown,
     notices,
   };

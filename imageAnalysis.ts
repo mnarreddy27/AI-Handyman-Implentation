@@ -2,15 +2,14 @@
  * imageAnalysis.ts
  *
  * Analyzes one or more photos or videos for any handyman task using Gemini Vision.
- * Returns observations, parameter inferences, validation flags,
- * and additional complexity detected from the visual/auditory media assets.
+ * Returns observations, validation flags, and additional complexity detected from the
+ * visual/auditory media assets based on general text descriptions.
  *
  * Resilience additions:
  * - Retry with exponential backoff on transient Gemini failures (429/5xx/timeout)
  * - Hard timeout so a hung request doesn't block the estimate forever
  * - Result caching so identical (media + task + params) calls skip the API entirely
- * - Defensive JSON parsing — a malformed Gemini response throws a typed error
- * instead of crashing the process
+ * - Defensive JSON parsing — a malformed Gemini response throws a typed error instead of crashing
  * - Imports normalized assets from mediaConversion to handle HEIC/MOV transparently
  */
 
@@ -22,19 +21,22 @@ import { buildCacheKey, getCached, setCached } from "./cache";
 import { normalizeMediaForGemini } from "./mediaConversion";
 
 function getClient(): GoogleGenAI {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  // Try to use GOOGLE_API_KEY first, fallback to GEMINI_API_KEY if that's what is set
+  const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+  
   if (!apiKey) {
     throw new ImageAnalysisError(
-      "GOOGLE_API_KEY is not set. Copy .env.example to .env and add your Gemini API key.",
+      "Gemini API key is not set. Please ensure GOOGLE_API_KEY or GEMINI_API_KEY is configured.",
       { retryable: false }
     );
   }
-  return new GoogleGenAI({ apiKey });
+
+  // Explicitly passing the apiKey inside the initialization object bypassed the internal undefined read error
+  return new GoogleGenAI({ apiKey: apiKey });
 }
 
 const GEMINI_MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES ?? 3);
 const GEMINI_RETRY_BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS ?? 500);
-// Increased threshold from 30s to 90s to comfortably swallow larger converted video payloads
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS ?? 90_000);
 const CACHE_TTL_SECONDS = Number(process.env.IMAGE_ANALYSIS_CACHE_TTL_SECONDS ?? 3600);
 
@@ -46,61 +48,51 @@ const MEDIA_ANALYSIS_SCHEMA = {
     observations: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "List of concrete visual or auditory observations relevant to the installation, repair, or setup task.",
+      description: "List of concrete visual or auditory observations regarding the physical space layout, scale, materials, or condition seen in the photos/videos.",
     },
     confidence: {
       type: Type.NUMBER,
-      description: "Overall confidence from 0.0 to 1.0 in the media analysis.",
-    },
-    parameterOverrides: {
-      type: Type.OBJECT,
-      description:
-        "Key-value pairs where keys match the task's parameter keys. " +
-        "Only include fields you can confidently infer from the media assets. " +
-        "Values should match the expected type (string, number, or boolean).",
-      additionalProperties: true,
+      description: "Overall confidence from 0.0 to 1.0 in the media analysis quality.",
     },
     validationFlags: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
       description:
-        "Conflicts between what the media shows/reveals and what the user provided. " +
+        "Conflicts between what the user provided in their general notes and what the media reveals. " +
         "Each item is a human-readable note like: " +
-        "'User said drywall but media shows brick wall.'",
+        "'User described clean wall but media reveals major water damage background holes.'",
     },
     additionalComplexityMinutes: {
       type: Type.INTEGER,
       description:
         "CRITICAL BEHAVIOR RULE DEPENDING ON THE TASK ID:\n" +
-        "1. For standard tasks: Return extra minutes to add BEYOND the standard base estimate.\n" +
-        "2. For the 'other' task: There is NO base estimate. This field MUST represent the TOTAL estimated duration " +
-        "in minutes for a professional technician to complete the entire job from scratch based on the description and media content.",
+        "1. For standard tasks: Return extra execution minutes to add BEYOND the baseline estimate due to real complications.\n" +
+        "2. For the 'other' task: There is NO system baseline time. This field MUST represent the absolute TOTAL estimated duration " +
+        "in minutes for a professional technician to complete the entire job from setup to cleanup.",
     },
     installerNotes: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
       description:
-        "Practical notes for the installer about what they'll encounter on-site. " +
-        "Be specific and actionable.",
+        "Practical, actionable technical notes for the installer about the exact environmental layout context they will encounter on-site.",
     },
     inferredTaskType: {
       type: Type.STRING,
       nullable: true,
       description:
-        "Only for 'other' tasks: your best description of what the task actually is " +
-        "(e.g. 'bathroom tile regrouting', 'exterior light fixture replacement', 'tree removal').",
+        "Only for 'other' tasks: your best technical description of what the task actually is " +
+        "(e.g. 'bathroom shower floor tile regrouting', 'exterior gutter assembly fixture').",
     },
     inferredComplexity: {
       type: Type.STRING,
       enum: ["simple", "moderate", "complex"],
       nullable: true,
-      description: "Only for 'other' tasks: inferred complexity level.",
+      description: "Only for 'other' tasks: inferred complexity classification level.",
     },
   },
   required: [
     "observations",
     "confidence",
-    "parameterOverrides",
     "validationFlags",
     "additionalComplexityMinutes",
     "installerNotes",
@@ -122,42 +114,36 @@ function buildPrompt(
   userParams: TaskParams,
   mediaCount: number
 ): string {
-  const paramLines = Object.entries(userParams)
-    .map(([k, v]) => `   ${k}: ${JSON.stringify(v)}`)
-    .join("\n");
+  const userNotes = userParams.notes || "(No additional descriptive notes provided by user)";
 
   const durationInstruction = task.id === "other"
     ? `CRITICAL TIME ESTIMATION RULE FOR 'OTHER' TASK:
-       Because this is an unclassified ('other') task, there is no system baseline time. 
-       You must populate the 'additionalComplexityMinutes' field with the TOTAL duration (in minutes) required 
-       for a professional handyman to complete the entire job from setup to cleanup. 
-       Do not provide a modifier; estimate the absolute total execution time (e.g., 120 for a 2-hour task).`
-    : `4. Set additionalComplexityMinutes for complications the standard parameters don't capture.
-       Examples: poor physical access, structural damage, surrounding hazards, heavy setup overhead, etc. 
-       This number will be added to a predefined baseline time.`;
+       Because this is a custom unclassified ('other') task, there is no system baseline time setup.
+       You must populate the 'additionalComplexityMinutes' field with the absolute TOTAL duration (in minutes) required 
+       for a professional handyman to complete this entire job from initial setup to cleanup.`
+    : `4. Evaluate the media assets and notes carefully for layout obstacles that go beyond a standard project setup.
+       Set 'additionalComplexityMinutes' with the extra execution time needed (e.g., poor access, rusted fixtures, damage, special heights). 
+       This number will be added straight to the task base time (${task.baseMinutes} mins).`;
 
-  return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) of a job site.
+  return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) alongside general project notes.
 
-TASK: ${task.label}
-TASK ID: ${task.id}
-TASK DESCRIPTION: ${task.imageHints}
+TASK TYPE: ${task.label}
+TASK GUIDELINES: ${task.imageHints}
 
-USER-PROVIDED PARAMETERS:
-${paramLines || "   (none provided)"}
+USER'S GENERAL PROJECT DESCRIPTION:
+"${userNotes}"
 
 INSTRUCTIONS:
-1. Analyze the image(s) and video frame(s) carefully for contextual details relevant to this specific task.
-2. Populate parameterOverrides ONLY for fields you can confidently infer from the provided media.
-   - For the "other" task, infer as much as possible (materials, scope, environment scope, access constraints, complexity).
-   - Parameter keys must exactly match the task's parameter keys listed above.
-3. Note any conflicts between what the user stated and what the media reveals in validationFlags.
+1. Carefully analyze the media and text for layout spacing, physical materials, current damage, or workspace obstacles.
+2. Document concrete physical environment findings inside 'observations'.
+3. Cross-reference the user's text description notes with what the media assets reveal. Note any explicit contradictions in 'validationFlags'.
 
 ${durationInstruction}
 
-5. Write actionable installerNotes — adjustments the technician should expect before arriving.
-6. Set confidence between 0.0 (very blurry/unusable media) and 1.0 (crystal clear, high certainty context).
+5. Write highly practical, detailed 'installerNotes' preparing the technician for exactly what they will encounter on-site.
+6. Set confidence score between 0.0 (unusable quality) and 1.0 (crystal clear, absolute certainty layout context).
 
-Return only valid JSON matching the schema. Be specific, structured, and honest — do not guess blindly if the media asset is vague or unclear.`;
+Return only valid JSON matching the schema structure. Do not guess blindly or output custom parameter keys.`;
 }
 
 function safeParseGeminiJson(text: string): unknown {
@@ -171,19 +157,19 @@ function safeParseGeminiJson(text: string): unknown {
   }
 }
 
-function normalizeResult(parsed: any): MediaAnalysisResult {
+function normalizeResult(parsed: unknown): MediaAnalysisResult {
+  // Cast to any to cleanly read properties on unknown shape at runtime
+  const data = parsed as any;
+  
   return {
-    observations: Array.isArray(parsed?.observations) ? parsed.observations : [],
-    confidence: clamp(Number(parsed?.confidence ?? 0.5), 0, 1),
-    parameterOverrides: typeof parsed?.parameterOverrides === "object" && parsed.parameterOverrides !== null
-      ? parsed.parameterOverrides
-      : {},
-    validationFlags: Array.isArray(parsed?.validationFlags) ? parsed.validationFlags : [],
-    additionalComplexityMinutes: Math.max(0, Number(parsed?.additionalComplexityMinutes ?? 0)),
-    installerNotes: Array.isArray(parsed?.installerNotes) ? parsed.installerNotes : [],
-    inferredTaskType: typeof parsed?.inferredTaskType === "string" ? parsed.inferredTaskType : undefined,
-    inferredComplexity: ["simple", "moderate", "complex"].includes(parsed?.inferredComplexity)
-      ? parsed.inferredComplexity
+    observations: Array.isArray(data?.observations) ? data.observations : [],
+    confidence: clamp(Number(data?.confidence ?? 0.5), 0, 1),
+    validationFlags: Array.isArray(data?.validationFlags) ? data.validationFlags : [],
+    additionalComplexityMinutes: Math.max(0, Number(data?.additionalComplexityMinutes ?? 0)),
+    installerNotes: Array.isArray(data?.installerNotes) ? data.installerNotes : [],
+    inferredTaskType: typeof data?.inferredTaskType === "string" ? data.inferredTaskType : undefined,
+    inferredComplexity: ["simple", "moderate", "complex"].includes(data?.inferredComplexity)
+      ? data.inferredComplexity
       : undefined,
   };
 }
@@ -197,11 +183,10 @@ function degradedFallbackResult(reason: string): MediaAnalysisResult {
   return {
     observations: [],
     confidence: 0,
-    parameterOverrides: {},
     validationFlags: [],
     additionalComplexityMinutes: 0,
     installerNotes: [
-      `Media analysis unavailable (${reason}). Estimate is based on submitted parameters only — confirm details on-site.`,
+      `Media analysis unavailable (${reason}). Estimate is based purely on text descriptions — verify layout constraints on-site.`,
     ],
   };
 }
@@ -227,7 +212,6 @@ export async function analyzeJobMedia(
     return {
       observations: [],
       confidence: 0,
-      parameterOverrides: {},
       validationFlags: [],
       additionalComplexityMinutes: 0,
       installerNotes: [],
@@ -242,8 +226,6 @@ export async function analyzeJobMedia(
   }
 
   // ── Unified Media Normalization Layer ─────────────────────────────────────
-  // Intercepts and flattens HEIC pictures and raw MOV video files into 
-  // Gemini-compliant payloads via mediaConversion utilities.
   const processedMediaItems = await Promise.all(
     mediaItems.map(async (item) => {
       try {
@@ -279,22 +261,31 @@ export async function analyzeJobMedia(
     const result = await withRetry(
       async () => {
         const ai = getClient();
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents,
-            config: {
-              responseMimeType: "application/json",
-              responseJsonSchema: MEDIA_ANALYSIS_SCHEMA,
-              temperature: 0.0,
-              seed: 42, 
-            },
-          }),
-          GEMINI_TIMEOUT_MS
-        );
+        
+        let response;
+        try {
+          response = await withTimeout(
+            ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents,
+              config: {
+                responseMimeType: "application/json",
+                responseJsonSchema: MEDIA_ANALYSIS_SCHEMA,
+                temperature: 0.0,
+                seed: 42, 
+              },
+            }),
+            GEMINI_TIMEOUT_MS
+          );
+        } catch (timeoutOrApiErr) {
+          throw new ImageAnalysisError(
+            `Gemini operational failure: ${timeoutOrApiErr instanceof Error ? timeoutOrApiErr.message : String(timeoutOrApiErr)}`,
+            { retryable: true }
+          );
+        }
 
-        if (!response.text) {
-          throw new ImageAnalysisError("Gemini returned an empty response", { retryable: true });
+        if (!response || !response.text) {
+          throw new ImageAnalysisError("Gemini returned an empty response text payload", { retryable: true });
         }
 
         const parsed = safeParseGeminiJson(response.text);

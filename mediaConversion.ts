@@ -6,21 +6,9 @@
  *
  * Why this exists:
  * - iPhones default to HEIC for photos and HEVC-in-MOV for video.
- * - Gemini's inline API does not reliably accept either format.
- * - Rather than reject every iPhone user's upload, we transparently
- * convert HEIC -> JPEG and MOV -> MP4 server-side first.
- *
- * Dependencies (add to package.json):
- * npm install sharp fluent-ffmpeg heic-decode
- * npm install -D @types/fluent-ffmpeg
- *
- * System requirement:
- * ffmpeg must be installed on the host machine running this code.
- * - Mac:     brew install ffmpeg
- * - Ubuntu: apt-get install ffmpeg
- * - Railway/Render/Docker: add `apt-get install -y ffmpeg` to your build step,
- * or use a base image that already includes it (e.g. node:20-bookworm + apt install).
- * sharp does NOT need any system dependency — it ships prebuilt binaries.
+ * - Massive uncompressed WebP images can trigger bulky network payload timeouts.
+ * - Rather than reject or hit timeouts on these formats, we transparently
+ * convert/compress them down server-side first.
  */
 
 import sharp from "sharp";
@@ -33,51 +21,60 @@ import { ImageAnalysisError } from "./errors";
 
 // ─── Format detection ────────────────────────────────────────────────────────
 
-const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
+// Added image/webp to the compression watchlist to prevent payload network timeouts
+const COMPRESSIBLE_IMAGE_MIME_TYPES = new Set(["image/heic", "image/heif", "image/webp"]);
 const CONVERTIBLE_VIDEO_MIME_TYPES = new Set(["video/quicktime"]); // .mov
 
 export function needsImageConversion(mimeType: string): boolean {
-  return HEIC_MIME_TYPES.has(mimeType);
+  return COMPRESSIBLE_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
 }
 
 export function needsVideoConversion(mimeType: string): boolean {
-  return CONVERTIBLE_VIDEO_MIME_TYPES.has(mimeType);
+  return CONVERTIBLE_VIDEO_MIME_TYPES.has(mimeType.toLowerCase());
 }
 
 export function needsConversion(mimeType: string): boolean {
   return needsImageConversion(mimeType) || needsVideoConversion(mimeType);
 }
 
-// ─── Image conversion: HEIC/HEIF -> JPEG ──────────────────────────────────────
+// ─── Image conversion & Compression ──────────────────────────────────────────
 
 /**
- * Converts HEIC/HEIF bytes to JPEG using a pure JS parser first to bypass native
- * libheif reference limit guardrails, then uses sharp to compress the pixel array.
- * Resizes images down cleanly to prevent bulky payload API network timeouts.
+ * Normalizes and compresses image assets. For HEIC/HEIF files, it runs a pure JS 
+ * decoder first to bypass binary constraints. For formats like WebP, it passes 
+ * the buffer directly to sharp to downscale and optimize into a clean progressive JPEG.
  */
-export async function convertHeicToJpeg(buffer: Buffer): Promise<{ buffer: Buffer; mimeType: "image/jpeg" }> {
+export async function processAndCompressImage(
+  buffer: Buffer,
+  mimeType: string
+): Promise<{ buffer: Buffer; mimeType: "image/jpeg" }> {
   try {
-    // Decode with pure JavaScript to completely ignore native cross-reference/security bounds
-    const { width, height, data } = await heicDecode({ buffer });
+    const cleanMime = mimeType.toLowerCase();
+    let sharpInput: any = buffer;
+    let sharpOptions: any = {};
 
-    // Package the raw unrolled frame, sizing to a healthy mid-ground resolution
-    const converted = await sharp(data, {
-      raw: { width, height, channels: 4 }
-    })
-    .resize({
-      width: 1600,              // High enough resolution to capture wall detailing
-      height: 1600,
-      fit: "inside",            // Retain original image proportions perfectly
-      withoutEnlargement: true  // Do not upscale small assets
-    })
-    .jpeg({ quality: 85, progressive: true }) // Production-ready balanced compression profile
-    .toBuffer();
+    // If it's an iOS HEIC file, handle decoding the raw pixel matrix first
+    if (cleanMime.includes("heic") || cleanMime.includes("heif")) {
+      const { width, height, data } = await heicDecode({ buffer });
+      sharpInput = data;
+      sharpOptions = { raw: { width, height, channels: 4 } };
+    }
+
+    // Process, scale down, and optimize payload footprint
+    const converted = await sharp(sharpInput, sharpOptions)
+      .resize({
+        width: 1600,              // Cap maximum resolution to capture workspace details safely
+        height: 1600,
+        fit: "inside",            // Keep original proportions completely intact
+        withoutEnlargement: true  // Prevent upscaling smaller mock assets
+      })
+      .jpeg({ quality: 85, progressive: true }) // Production-balanced baseline compression
+      .toBuffer();
 
     return { buffer: converted, mimeType: "image/jpeg" };
   } catch (err) {
     throw new ImageAnalysisError(
-      `Failed to convert HEIC image to JPEG: ${err instanceof Error ? err.message : String(err)}. ` +
-      `The file may be corrupted or not a valid HEIC.`,
+      `Failed to convert/compress image asset (${mimeType}): ${err instanceof Error ? err.message : String(err)}.`,
       { cause: err, retryable: false }
     );
   }
@@ -143,7 +140,7 @@ export async function normalizeMediaForGemini(
 ): Promise<ConversionResult> {
 
   if (needsImageConversion(mimeType)) {
-    const { buffer: converted, mimeType: newMimeType } = await convertHeicToJpeg(buffer);
+    const { buffer: converted, mimeType: newMimeType } = await processAndCompressImage(buffer, mimeType);
     return { buffer: converted, mimeType: newMimeType, wasConverted: true, originalMimeType: mimeType };
   }
 
