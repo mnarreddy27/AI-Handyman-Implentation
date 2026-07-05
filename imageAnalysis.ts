@@ -116,14 +116,11 @@ function buildPrompt(
 ): string {
   const userNotes = userParams.notes || "(No additional descriptive notes provided by user)";
 
-  const durationInstruction = task.id === "other"
-    ? `CRITICAL TIME ESTIMATION RULE FOR 'OTHER' TASK:
-       Because this is a custom unclassified ('other') task, there is no system baseline time setup.
-       You must populate the 'additionalComplexityMinutes' field with the absolute TOTAL duration (in minutes) required 
-       for a professional handyman to complete this entire job from initial setup to cleanup.`
-    : `4. Evaluate the media assets and notes carefully for layout obstacles that go beyond a standard project setup.
-       Set 'additionalComplexityMinutes' with the extra execution time needed (e.g., poor access, rusted fixtures, damage, special heights). 
-       This number will be added straight to the task base time (${task.baseMinutes} mins).`;
+  // The AI is now explicitly told to output the absolute TOTAL time here
+  const durationInstruction = `CRITICAL TIME ESTIMATION RULE:
+       You must populate the 'additionalComplexityMinutes' field with the absolute TOTAL duration (in minutes) 
+       required for a professional handyman to complete this entire job from initial setup, unboxing, and execution to cleanup. 
+       Do not just calculate "extra" time or look for deviations—provide your complete, single end-to-end duration estimate based on the physical scale seen in the media and the text description context.`;
 
   return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) alongside general project notes.
 
@@ -202,6 +199,10 @@ export interface AnalyzeOptions {
  * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and 
  * processes them concurrently against the Gemini multimodal framework.
  */
+/**
+ * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and 
+ * processes them concurrently against the Gemini multimodal framework.
+ */
 export async function analyzeJobMedia(
   mediaItems: MediaInput[],
   task: TaskDefinition,
@@ -220,9 +221,15 @@ export async function analyzeJobMedia(
 
   // ── Cache check ──────────────────────────────────────────────────────────
   const cacheKey = buildCacheKey(task.id, mediaItems.map(m => m.inlineData.data), userParams);
-  const cached = getCached(cacheKey);
-  if (cached) {
-    return cached as MediaAnalysisResult;
+  const isCacheDisabled = true;
+
+  if (!isCacheDisabled) {
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return cached as MediaAnalysisResult;
+    }
+  } else {
+    console.log("🔄 [Cache] Cache disabled by environment. Fetching fresh data from Gemini...");
   }
 
   // ── Unified Media Normalization Layer ─────────────────────────────────────
@@ -303,7 +310,11 @@ export async function analyzeJobMedia(
       }
     );
 
-    setCached(cacheKey, result, CACHE_TTL_SECONDS);
+    // Only save fresh entries back to disk if cache isn't bypassed globally
+    if (!isCacheDisabled) {
+      setCached(cacheKey, result, CACHE_TTL_SECONDS);
+    }
+    
     return result;
 
   } catch (error) {

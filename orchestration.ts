@@ -38,9 +38,8 @@ export async function estimateHandymanTask(
     throw new Error(`Unknown task ID: "${taskId}". Check taskRegistry.ts for valid IDs.`);
   }
 
-  // 2. Analyze media assets (supports 0 to N images/videos concurrently)
+  // 2. Analyze media assets
   let mediaResult: MediaAnalysisResult | null = null;
-
   if (mediaItems.length > 0) {
     mediaResult = await analyzeJobMedia(mediaItems, task, userParams);
   }
@@ -54,36 +53,22 @@ export async function estimateHandymanTask(
   // 4. Determine confidence score
   const confidenceScore = calcConfidence(mediaResult);
 
-  // ─── 5. Run Estimation ─────────────────────────────────────────────────────
-  let estimation;
-
-  if (task.id === "other") {
-    // 🧠 Pure Semantic Route: The AI provides the ENTIRE duration estimate
-    const totalAiMinutes = mediaResult?.additionalComplexityMinutes ?? 45;
+  // ─── 5. Pure AI Single Estimate Route ──────────────────────────────────────
+  // We take the single time outputted by Gemini. If the network dropped entirely, 
+  // we fall back to a safe baseline default of 45 minutes.
+  const finalAiMinutes = mediaResult && mediaResult.additionalComplexityMinutes > 0 
+    ? mediaResult.additionalComplexityMinutes 
+    : 45; 
     
-    estimation = {
-      estimatedDurationMinutes: totalAiMinutes,
-      rangeMinMinutes: Math.max(15, Math.round(totalAiMinutes * 0.8)),
-      rangeMaxMinutes: Math.round(totalAiMinutes * 1.2),
-      confidenceScore: confidenceScore,
-      breakdown: {
-        ai_custom_estimate: totalAiMinutes
-      },
-      notices: []
-    };
-  } else {
-    // ⚙️ Standard Route: Base + modifiers calculated through the engine
-    estimation = estimateTaskTime(
-      task.id,
-      task.baseMinutes,
-      userParams,
-      confidenceScore,
-      mediaResult?.additionalComplexityMinutes ?? 0
-    );
-  }
-
-  // Merge estimation engine tracking notices
-  allNotices.push(...estimation.notices);
+  const estimation = {
+    estimatedDurationMinutes: finalAiMinutes,
+    rangeMinMinutes: Math.max(15, Math.round(finalAiMinutes * 0.75)), // -25% range window
+    rangeMaxMinutes: Math.round(finalAiMinutes * 1.25),             // +25% range window
+    confidenceScore: confidenceScore,
+    breakdown: {
+      ai_total_estimate: finalAiMinutes // Clean breakdown with just the one AI time!
+    }
+  };
 
   // 6. Build unified output matching workspace layout contracts
   return {
@@ -105,7 +90,7 @@ export async function estimateHandymanTask(
           observations: mediaResult.observations,
           installerNotes: mediaResult.installerNotes,
           additionalComplexityMinutes: mediaResult.additionalComplexityMinutes,
-          inferredTaskType: mediaResult.inferredTaskType,
+          inferredTaskType: mediaResult.inferredTaskType || task.label,
         }
       : undefined,
   };

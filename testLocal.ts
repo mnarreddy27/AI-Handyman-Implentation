@@ -164,34 +164,49 @@ async function runTests() {
   console.log(`📂 Looking for test assets in: ${ASSETS_DIR}\n`);
 
   // ── Test 1: Single Image Assessment ───────────────────────────────────────
+ 
+ 
+
   try {
-    console.log("── Test 1: TV Installation: (Single Image Base Case) ──");
-    const media = await loadMediaSuite(["TvOnBrick.webp"]);
-    const result = await estimateHandymanTask("tv_installation", {}, media);
+    console.log("\n── Test 1: TV Installation: (Heavy/Complex Mount Surface Case) ──");
+    
+    
+    const media = await loadMediaSuite(["FurnitureTwo.png"]);
+    
+    
+    const userParams = {
+      notes: "Assembling a massive, heavy bookshelf. The instruction manual is completely missing, and some of the back panels appear to have minor water warping."
+    };
+  
+    
+    const result = await estimateHandymanTask("furniture_assembly", userParams, media);
+    
     printResult(result);
+  
   } catch (err) {
-    console.error("  ❌ Test 1 Encountered Error:", err instanceof Error ? err.message : err);
+    console.error("   ❌ Test 4 Encountered Error:", err instanceof Error ? err.message : err);
   }
+
 
   // ── Test 2: Two Images Assessment ─────────────────────────────────────────
-  try {
-    console.log("── Test 2: TV Installation: (Two Images) ──");
-    const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1469.HEIC"]);
-    const result = await estimateHandymanTask("tv_installation", {}, media);
-    printResult(result);
-  } catch (err) {
-    console.error("  ❌ Test 2 Encountered Error:", err instanceof Error ? err.message : err);
-  }
+  // try {
+  //   console.log("── Test 2: TV Installation: (Two Images) ──");
+  //   const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1469.HEIC"]);
+  //   const result = await estimateHandymanTask("tv_installation", {}, media);
+  //   printResult(result);
+  // } catch (err) {
+  //   console.error("  ❌ Test 2 Encountered Error:", err instanceof Error ? err.message : err);
+  // }
 
-  // ── Test 3: Mixed Media (Image + Video) ───────────────────────────────────
-  try {
-    console.log("── Test 3: TV Installation: (Image, Video) ──");
-    const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1463.MOV"]);
-    const result = await estimateHandymanTask("tv_installation", {}, media);
-    printResult(result);
-  } catch (err) {
-    console.error("  ❌ Test 3 Encountered Error:", err instanceof Error ? err.message : err);
-  }
+  // // ── Test 3: Mixed Media (Image + Video) ───────────────────────────────────
+  // try {
+  //   console.log("── Test 3: TV Installation: (Image, Video) ──");
+  //   const media = await loadMediaSuite(["IMG_1468.HEIC", "IMG_1463.MOV"]);
+  //   const result = await estimateHandymanTask("tv_installation", {}, media);
+  //   printResult(result);
+  // } catch (err) {
+  //   console.error("  ❌ Test 3 Encountered Error:", err instanceof Error ? err.message : err);
+  // }
 
   console.log("\n✅ Assessment runs finished.");
 }
