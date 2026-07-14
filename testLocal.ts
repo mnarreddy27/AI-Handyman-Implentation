@@ -168,14 +168,14 @@ async function runTests() {
  
 
   try {
-    console.log("\n── Test 1: TV Installation: (Heavy/Complex Mount Surface Case) ──");
+    console.log("\n── Test 1: ──");
     
     
-    const media = await loadMediaSuite(["FurnitureTwo.png"]);
+    const media = await loadMediaSuite([]);
     
     
     const userParams = {
-      notes: "Assembling a massive, heavy bookshelf. The instruction manual is completely missing, and some of the back panels appear to have minor water warping."
+      notes:"I need to assemble a mid-sized office desk. It has several drawers, metal tracks that need to be aligned, and quite a few cam-locks. I've already cleared the space, but I don't have a power drill, so everything will be manual."
     };
   
     
