@@ -56,11 +56,10 @@ export interface MediaAnalysisResult {
   validationFlags: string[];
 
   /**
-   * Additional time modifiers the AI detected from the media that aren't
-   * covered by the standard param set (e.g. "wall has extensive water damage",
-   * "tight space with limited tool access", "audible squeaking indicates subfloor friction").
+   * Absolute total estimated duration in minutes for the entire job,
+   * as determined by Gemini from media and/or text context.
    */
-  additionalComplexityMinutes: number;
+  estimatedDurationMinutes: number;
 
   /**
    * Free-text notes to surface to the installer.
@@ -120,7 +119,7 @@ export interface HandymanEstimateOutput {
   mediaInsights?: {
     observations: string[];
     installerNotes: string[];
-    additionalComplexityMinutes: number;
+    estimatedDurationMinutes: number;
     inferredTaskType?: string;
   };
 }

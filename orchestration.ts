@@ -3,25 +3,46 @@
  *
  * Orchestrates the full estimation pipeline for any handyman task:
  * 1. Validate the task ID against the registry
- * 2. Analyze job site media files (unlimited pictures, videos, or mixed)
- * 3. Reconcile user context and media observations
- * 4. Run the estimation engine (or handle dynamic pure-AI estimation for 'other')
- * 5. Return the unified output
+ * 2. Send media and/or text to Gemini for analysis and time estimation
+ * 3. Reconcile user context with AI-inferred parameter overrides
+ * 4. Return the unified output
+ *
+ * All time estimates come from Gemini — no math-based estimation engine.
  */
 
-import { analyzeJobMedia } from "./imageAnalysis";
-import { estimateTaskTime } from "./estimationEngine";
+import { estimateJobWithGemini } from "./imageAnalysis";
 import { getTask } from "./taskRegistry";
-import { HandymanEstimateOutput, MediaAnalysisResult, MediaInput, TaskParams } from "./types";
+import { HandymanEstimateOutput, MediaInput, TaskParams } from "./types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Calculate overall confidence score based directly on media asset analysis.
- */
-function calcConfidence(mediaResult: MediaAnalysisResult | null): number {
-  const mediaConfidence = mediaResult?.confidence ?? 0.55;
-  return Math.min(1, Math.max(0.35, mediaConfidence));
+function getUserNotes(params: TaskParams): string | undefined {
+  const notes = params.notes;
+  return typeof notes === "string" && notes.trim().length > 0 ? notes.trim() : undefined;
+}
+
+function reconcileParams(
+  userParams: TaskParams,
+  overrides: TaskParams | undefined
+): TaskParams {
+  const reconciled: TaskParams = { ...userParams };
+  if (!overrides) return reconciled;
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (reconciled[key] === undefined) {
+      reconciled[key] = value;
+    }
+  }
+
+  return reconciled;
+}
+
+function buildRange(totalMinutes: number, confidenceScore: number) {
+  const buffer = confidenceScore >= 0.8 ? 0.15 : confidenceScore >= 0.6 ? 0.25 : 0.4;
+  return {
+    rangeMinMinutes: Math.max(15, Math.round(totalMinutes * (1 - buffer / 2))),
+    rangeMaxMinutes: Math.round(totalMinutes * (1 + buffer)),
+  };
 }
 
 // ─── Main orchestrator ────────────────────────────────────────────────────────
@@ -31,66 +52,52 @@ export async function estimateHandymanTask(
   userParams: TaskParams,
   mediaItems: MediaInput[] = []
 ): Promise<HandymanEstimateOutput> {
-
-  // 1. Look up the task
   const task = getTask(taskId);
   if (!task) {
     throw new Error(`Unknown task ID: "${taskId}". Check taskRegistry.ts for valid IDs.`);
   }
 
-  // 2. Analyze media assets
-  let mediaResult: MediaAnalysisResult | null = null;
-  if (mediaItems.length > 0) {
-    mediaResult = await analyzeJobMedia(mediaItems, task, userParams);
+  const hasMedia = mediaItems.length > 0;
+  const hasNotes = Boolean(getUserNotes(userParams));
+
+  if (!hasMedia && !hasNotes) {
+    throw new Error(
+      `Task "${taskId}" requires at least one photo/video or descriptive notes for Gemini to estimate.`
+    );
   }
 
-  // 3. Collect all descriptive notices
+  const geminiResult = await estimateJobWithGemini(task, userParams, mediaItems);
+  const reconciledParams = reconcileParams(userParams, geminiResult.parameterOverrides);
+
+  const totalMinutes = geminiResult.estimatedDurationMinutes;
+  const confidenceScore = Math.min(1, Math.max(0.35, geminiResult.confidence));
+  const { rangeMinMinutes, rangeMaxMinutes } = buildRange(totalMinutes, confidenceScore);
+
   const allNotices: string[] = [
-    ...(mediaResult?.validationFlags ?? []),
-    ...(mediaResult?.installerNotes ?? []),
+    ...geminiResult.validationFlags,
+    ...geminiResult.installerNotes,
   ];
 
-  // 4. Determine confidence score
-  const confidenceScore = calcConfidence(mediaResult);
-
-  // ─── 5. Pure AI Single Estimate Route ──────────────────────────────────────
-  // We take the single time outputted by Gemini. If the network dropped entirely, 
-  // we fall back to a safe baseline default of 45 minutes.
-  const finalAiMinutes = mediaResult && mediaResult.additionalComplexityMinutes > 0 
-    ? mediaResult.additionalComplexityMinutes 
-    : 45; 
-    
-  const estimation = {
-    estimatedDurationMinutes: finalAiMinutes,
-    rangeMinMinutes: Math.max(15, Math.round(finalAiMinutes * 0.75)), // -25% range window
-    rangeMaxMinutes: Math.round(finalAiMinutes * 1.25),             // +25% range window
-    confidenceScore: confidenceScore,
-    breakdown: {
-      ai_total_estimate: finalAiMinutes // Clean breakdown with just the one AI time!
-    }
-  };
-
-  // 6. Build unified output matching workspace layout contracts
   return {
     taskId: task.id,
     taskLabel: task.label,
 
-    estimatedDurationMinutes: estimation.estimatedDurationMinutes,
-    rangeMinMinutes: estimation.rangeMinMinutes,
-    rangeMaxMinutes: estimation.rangeMaxMinutes,
-    confidenceScore: estimation.confidenceScore,
+    estimatedDurationMinutes: totalMinutes,
+    rangeMinMinutes,
+    rangeMaxMinutes,
+    confidenceScore,
 
-    reconciledParams: userParams,
-    notices: [...new Set(allNotices)], // deduplicate
+    reconciledParams,
+    notices: Array.from(new Set(allNotices)),
 
-    breakdown: estimation.breakdown,
+    breakdown: { ai_total_estimate: totalMinutes },
 
-    mediaInsights: mediaResult
+    mediaInsights: hasMedia
       ? {
-          observations: mediaResult.observations,
-          installerNotes: mediaResult.installerNotes,
-          additionalComplexityMinutes: mediaResult.additionalComplexityMinutes,
-          inferredTaskType: mediaResult.inferredTaskType || task.label,
+          observations: geminiResult.observations,
+          installerNotes: geminiResult.installerNotes,
+          estimatedDurationMinutes: geminiResult.estimatedDurationMinutes,
+          inferredTaskType: geminiResult.inferredTaskType || task.label,
         }
       : undefined,
   };

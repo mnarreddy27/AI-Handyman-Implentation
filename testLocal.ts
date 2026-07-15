@@ -145,7 +145,7 @@ function printResult(result: Awaited<ReturnType<typeof estimateHandymanTask>>) {
 
   if (result.mediaInsights) {
     console.log(` 🖥️  Multimodal Media Insights:`);
-    console.log(`     • Complexity Minutes: ${result.mediaInsights.additionalComplexityMinutes} min`);
+    console.log(`     • Estimated Duration: ${result.mediaInsights.estimatedDurationMinutes} min`);
     result.mediaInsights.observations.forEach(o => console.log(`     👁  Observation: ${o}`));
     result.mediaInsights.installerNotes.forEach(note => console.log(`     📝 Note: ${note}`));
 
@@ -175,11 +175,11 @@ async function runTests() {
     
     
     const userParams = {
-      notes:"I need to assemble a mid-sized office desk. It has several drawers, metal tracks that need to be aligned, and quite a few cam-locks. I've already cleared the space, but I don't have a power drill, so everything will be manual."
+      notes:"I have a small backyard deck that was stained last year. It is about 150 square feet, and it's in good condition with no rot. I just need a fresh coat of semi-transparent stain applied. The surface is clean and ready for immediate application."
     };
   
     
-    const result = await estimateHandymanTask("furniture_assembly", userParams, media);
+    const result = await estimateHandymanTask("deck_staining", userParams, media);
     
     printResult(result);
   

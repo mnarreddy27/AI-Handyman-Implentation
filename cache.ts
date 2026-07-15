@@ -14,11 +14,10 @@
  */
 
 import { createHash } from "crypto";
-import { ImageAnalysisResult } from "./types";
-import { TaskParams } from "./taskRegistry";
+import { MediaAnalysisResult, TaskParams } from "./types";
 
 interface CacheEntry {
-  value: ImageAnalysisResult;
+  value: MediaAnalysisResult;
   expiresAt: number;
 }
 
@@ -70,7 +69,7 @@ export function buildCacheKey(
   return hash.digest("hex");
 }
 
-export function getCached(key: string): ImageAnalysisResult | null {
+export function getCached(key: string): MediaAnalysisResult | null {
   const entry = store.get(key);
   if (!entry) return null;
 
@@ -82,7 +81,7 @@ export function getCached(key: string): ImageAnalysisResult | null {
   return entry.value;
 }
 
-export function setCached(key: string, value: ImageAnalysisResult, ttlSeconds: number): void {
+export function setCached(key: string, value: MediaAnalysisResult, ttlSeconds: number): void {
   if (ttlSeconds <= 0) return; // caching disabled
 
   startCleanupTimer();

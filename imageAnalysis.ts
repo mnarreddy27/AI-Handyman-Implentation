@@ -14,15 +14,15 @@
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { TaskDefinition, TaskParams } from "./taskRegistry";
-import { MediaAnalysisResult, MediaInput } from "./types";
+import { TaskDefinition } from "./taskRegistry";
+import { MediaAnalysisResult, MediaInput, TaskParams } from "./types";
 import { ImageAnalysisError, GeminiResponseParseError, withRetry, withTimeout } from "./errors";
 import { buildCacheKey, getCached, setCached } from "./cache";
 import { normalizeMediaForGemini } from "./mediaConversion";
 
 function getClient(): GoogleGenAI {
   // Try to use GOOGLE_API_KEY first, fallback to GEMINI_API_KEY if that's what is set
-  const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey = (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)?.trim();
   
   if (!apiKey) {
     throw new ImageAnalysisError(
@@ -62,13 +62,11 @@ const MEDIA_ANALYSIS_SCHEMA = {
         "Each item is a human-readable note like: " +
         "'User described clean wall but media reveals major water damage background holes.'",
     },
-    additionalComplexityMinutes: {
+    estimatedDurationMinutes: {
       type: Type.INTEGER,
       description:
-        "CRITICAL BEHAVIOR RULE DEPENDING ON THE TASK ID:\n" +
-        "1. For standard tasks: Return extra execution minutes to add BEYOND the baseline estimate due to real complications.\n" +
-        "2. For the 'other' task: There is NO system baseline time. This field MUST represent the absolute TOTAL estimated duration " +
-        "in minutes for a professional technician to complete the entire job from setup to cleanup.",
+        "Absolute TOTAL estimated duration in minutes for a professional handyman to complete the entire job from setup through cleanup. " +
+        "Base this entirely on the media and/or text provided — do not use any pre-set baseline times.",
     },
     installerNotes: {
       type: Type.ARRAY,
@@ -94,7 +92,7 @@ const MEDIA_ANALYSIS_SCHEMA = {
     "observations",
     "confidence",
     "validationFlags",
-    "additionalComplexityMinutes",
+    "estimatedDurationMinutes",
     "installerNotes",
   ],
 };
@@ -114,13 +112,16 @@ function buildPrompt(
   userParams: TaskParams,
   mediaCount: number
 ): string {
-  const userNotes = userParams.notes || "(No additional descriptive notes provided by user)";
+  const rawNotes = userParams.notes;
+  const userNotes =
+    typeof rawNotes === "string" && rawNotes.trim().length > 0
+      ? rawNotes.trim()
+      : "(No additional descriptive notes provided by user)";
 
-  // The AI is now explicitly told to output the absolute TOTAL time here
   const durationInstruction = `CRITICAL TIME ESTIMATION RULE:
-       You must populate the 'additionalComplexityMinutes' field with the absolute TOTAL duration (in minutes) 
-       required for a professional handyman to complete this entire job from initial setup, unboxing, and execution to cleanup. 
-       Do not just calculate "extra" time or look for deviations—provide your complete, single end-to-end duration estimate based on the physical scale seen in the media and the text description context.`;
+       Populate 'estimatedDurationMinutes' with the absolute TOTAL duration (in minutes) required for a professional handyman
+       to complete this entire job from setup through cleanup. Base your estimate entirely on what you observe in the media
+       and the user's description. Do not use or reference any pre-set baseline times.`;
 
   return `You are an expert handyman estimator analyzing ${mediaCount} media file(s) (pictures and/or videos) alongside general project notes.
 
@@ -154,6 +155,136 @@ function safeParseGeminiJson(text: string): unknown {
   }
 }
 
+// ─── Analysis types ──────────────────────────────────────────────────────────
+
+export interface AnalyzeOptions {
+  /** If true, throws on Gemini failure instead of returning a degraded fallback result. */
+  throwOnFailure?: boolean;
+}
+
+function buildTextOnlyPrompt(task: TaskDefinition, userParams: TaskParams): string {
+  const rawNotes = userParams.notes;
+  const userNotes =
+    typeof rawNotes === "string" && rawNotes.trim().length > 0
+      ? rawNotes.trim()
+      : "(No additional descriptive notes provided by user)";
+
+  return `You are an expert handyman estimator. No photos or videos were provided — estimate based on the task type and user description alone.
+
+TASK TYPE: ${task.label}
+TASK GUIDELINES: ${task.imageHints}
+
+USER'S PROJECT DESCRIPTION:
+"${userNotes}"
+
+INSTRUCTIONS:
+1. Infer the scope, scale, and complexity from the user's description.
+2. Document your reasoning as concrete observations inside 'observations'.
+3. Populate 'estimatedDurationMinutes' with the absolute TOTAL duration (in minutes) for a professional handyman to complete the entire job from setup through cleanup. Do not use any pre-set baseline times.
+4. Write practical 'installerNotes' preparing the technician for what they will likely encounter on-site.
+5. Set confidence between 0.0 (very little detail provided) and 1.0 (detailed, unambiguous description).
+
+Return only valid JSON matching the schema structure.`;
+}
+
+async function runGeminiAnalysis(
+  contents: string | Array<{ text: string } | { inlineData: { data: string; mimeType: string } }>,
+  taskId: string
+): Promise<MediaAnalysisResult> {
+  const ai = getClient();
+
+  let response;
+  try {
+    response = await withTimeout(
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: MEDIA_ANALYSIS_SCHEMA,
+          temperature: 0.2,
+        },
+      }),
+      GEMINI_TIMEOUT_MS
+    );
+  } catch (timeoutOrApiErr) {
+    throw new ImageAnalysisError(
+      `Gemini operational failure: ${timeoutOrApiErr instanceof Error ? timeoutOrApiErr.message : String(timeoutOrApiErr)}`,
+      { retryable: true }
+    );
+  }
+
+  if (!response?.text) {
+    throw new ImageAnalysisError("Gemini returned an empty response text payload", { retryable: true });
+  }
+
+  const parsed = safeParseGeminiJson(response.text);
+  const result = normalizeResult(parsed);
+
+  if (result.estimatedDurationMinutes <= 0) {
+    throw new ImageAnalysisError(
+      `Gemini returned an invalid duration for task "${taskId}"`,
+      { retryable: true }
+    );
+  }
+
+  return result;
+}
+
+async function estimateFromTextOnly(
+  task: TaskDefinition,
+  userParams: TaskParams,
+  options: AnalyzeOptions = {}
+): Promise<MediaAnalysisResult> {
+  const prompt = buildTextOnlyPrompt(task, userParams);
+
+  try {
+    return await withRetry(
+      () => runGeminiAnalysis(prompt, task.id),
+      {
+        maxRetries: GEMINI_MAX_RETRIES,
+        baseDelayMs: GEMINI_RETRY_BASE_DELAY_MS,
+        onRetry: (attempt, error) => {
+          console.warn(
+            `[textAnalysis] Retry ${attempt}/${GEMINI_MAX_RETRIES} for task "${task.id}" after error:`,
+            error instanceof Error ? error.message : error
+          );
+        },
+      }
+    );
+  } catch (error) {
+    console.error(`[textAnalysis] Failed for task "${task.id}" after retries:`, error);
+
+    if (options.throwOnFailure) {
+      if (error instanceof ImageAnalysisError || error instanceof GeminiResponseParseError) {
+        throw error;
+      }
+      throw new ImageAnalysisError(
+        `Text analysis failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error, retryable: false }
+      );
+    }
+
+    const reason = error instanceof Error ? error.message : "unknown error";
+    return degradedFallbackResult(reason);
+  }
+}
+
+/**
+ * Unified Gemini entry point — handles picture-only, picture+text, or text-only jobs.
+ */
+export async function estimateJobWithGemini(
+  task: TaskDefinition,
+  userParams: TaskParams = {},
+  mediaItems: MediaInput[] = [],
+  options: AnalyzeOptions = {}
+): Promise<MediaAnalysisResult> {
+  if (mediaItems.length > 0) {
+    return analyzeJobMedia(mediaItems, task, userParams, options);
+  }
+  return estimateFromTextOnly(task, userParams, options);
+}
+
 function normalizeResult(parsed: unknown): MediaAnalysisResult {
   // Cast to any to cleanly read properties on unknown shape at runtime
   const data = parsed as any;
@@ -161,8 +292,15 @@ function normalizeResult(parsed: unknown): MediaAnalysisResult {
   return {
     observations: Array.isArray(data?.observations) ? data.observations : [],
     confidence: clamp(Number(data?.confidence ?? 0.5), 0, 1),
+    parameterOverrides:
+      data?.parameterOverrides && typeof data.parameterOverrides === "object"
+        ? (data.parameterOverrides as TaskParams)
+        : {},
     validationFlags: Array.isArray(data?.validationFlags) ? data.validationFlags : [],
-    additionalComplexityMinutes: Math.max(0, Number(data?.additionalComplexityMinutes ?? 0)),
+    estimatedDurationMinutes: Math.max(
+      0,
+      Number(data?.estimatedDurationMinutes ?? data?.additionalComplexityMinutes ?? data?.minutes ?? 0)
+    ),
     installerNotes: Array.isArray(data?.installerNotes) ? data.installerNotes : [],
     inferredTaskType: typeof data?.inferredTaskType === "string" ? data.inferredTaskType : undefined,
     inferredComplexity: ["simple", "moderate", "complex"].includes(data?.inferredComplexity)
@@ -180,28 +318,20 @@ function degradedFallbackResult(reason: string): MediaAnalysisResult {
   return {
     observations: [],
     confidence: 0,
+    parameterOverrides: {},
     validationFlags: [],
-    additionalComplexityMinutes: 0,
+    estimatedDurationMinutes: 0,
     installerNotes: [
       `Media analysis unavailable (${reason}). Estimate is based purely on text descriptions — verify layout constraints on-site.`,
     ],
   };
 }
 
-// ─── Mixed Media analysis ───────────────────────────────────────────────────
-
-export interface AnalyzeOptions {
-  /** If true, throws on Gemini failure instead of returning a degraded fallback result. */
-  throwOnFailure?: boolean;
-}
+// ─── Media analysis ─────────────────────────────────────────────────────────
 
 /**
- * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and 
- * processes them concurrently against the Gemini multimodal framework.
- */
-/**
- * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and 
- * processes them concurrently against the Gemini multimodal framework.
+ * Accepts an array of dynamic MediaInputs (images, videos, or mixed) and
+ * processes them against the Gemini multimodal framework.
  */
 export async function analyzeJobMedia(
   mediaItems: MediaInput[],
@@ -210,13 +340,7 @@ export async function analyzeJobMedia(
   options: AnalyzeOptions = {}
 ): Promise<MediaAnalysisResult> {
   if (mediaItems.length === 0) {
-    return {
-      observations: [],
-      confidence: 0,
-      validationFlags: [],
-      additionalComplexityMinutes: 0,
-      installerNotes: [],
-    };
+    throw new ImageAnalysisError("analyzeJobMedia requires at least one media item.", { retryable: false });
   }
 
   // ── Cache check ──────────────────────────────────────────────────────────
@@ -254,49 +378,20 @@ export async function analyzeJobMedia(
 
   const prompt = buildPrompt(task, userParams, processedMediaItems.length);
 
-  const contents: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [
-    { text: prompt },
-    ...processedMediaItems.map((item) => ({
-      inlineData: {
-        data: stripBase64Prefix(item.inlineData.data),
-        mimeType: item.inlineData.mimeType,
-      },
-    })),
-  ];
-
   try {
     const result = await withRetry(
       async () => {
-        const ai = getClient();
-        
-        let response;
-        try {
-          response = await withTimeout(
-            ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents,
-              config: {
-                responseMimeType: "application/json",
-                responseJsonSchema: MEDIA_ANALYSIS_SCHEMA,
-                temperature: 0.0,
-                seed: 42, 
-              },
-            }),
-            GEMINI_TIMEOUT_MS
-          );
-        } catch (timeoutOrApiErr) {
-          throw new ImageAnalysisError(
-            `Gemini operational failure: ${timeoutOrApiErr instanceof Error ? timeoutOrApiErr.message : String(timeoutOrApiErr)}`,
-            { retryable: true }
-          );
-        }
+        const contents: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [
+          { text: prompt },
+          ...processedMediaItems.map((item) => ({
+            inlineData: {
+              data: stripBase64Prefix(item.inlineData.data),
+              mimeType: item.inlineData.mimeType,
+            },
+          })),
+        ];
 
-        if (!response || !response.text) {
-          throw new ImageAnalysisError("Gemini returned an empty response text payload", { retryable: true });
-        }
-
-        const parsed = safeParseGeminiJson(response.text);
-        return normalizeResult(parsed);
+        return runGeminiAnalysis(contents, task.id);
       },
       {
         maxRetries: GEMINI_MAX_RETRIES,
